@@ -1,18 +1,21 @@
-"""LLM interface + Groq implementation.
+"""LLM interface + Google Gemini implementation.
 
-The system is backend-pluggable: primitives never call Groq directly.
-They go through LLMClient.chat(), which lets tests inject a FakeLLM with
-deterministic responses.
+The system is backend-pluggable through the `LLMClient` Protocol: primitives
+never call the Gemini SDK directly — they go through a client's `chat()`,
+which lets tests inject a stub with deterministic responses.
 
-Groq is OpenAI-compatible; the official `groq` SDK semantics are used here.
+One provider is supported in production: Google Gemini via the `google-genai`
+SDK. Per-component model routing is handled by `RouterLLMClient`, which maps
+each agent's `kind` to a model id from `archforge.config`.
 """
 
 from __future__ import annotations
 
-import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
+
+from ..config import GEMINI_API_KEY_ENV, load_llm_routes
 
 
 @dataclass
@@ -36,120 +39,122 @@ class LLMClient(Protocol):
         ...
 
 
-# ─── Groq implementation ───────────────────────────────────────────────────
-
-DEFAULT_GROQ_MODEL = os.environ.get("ARCHFORGE_GROQ_MODEL", "llama-3.1-8b-instant")
-
-# Pricing (USD per 1M tokens) — used by the evaluator for cost normalisation.
-# Defaults to llama-3.1-8b-instant pricing on Groq as of plan inception.
-GROQ_PRICING_USD_PER_1M: dict[str, dict[str, float]] = {
-    "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
-    "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
-    "mixtral-8x7b-32768": {"input": 0.24, "output": 0.24},
-}
+# ─── Gemini implementation ───────────────────────────────────────────────────
 
 
-def groq_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    pricing = GROQ_PRICING_USD_PER_1M.get(model, {"input": 0.0, "output": 0.0})
-    return (
-        pricing["input"] * prompt_tokens / 1_000_000
-        + pricing["output"] * completion_tokens / 1_000_000
-    )
+def _is_gemma(model: str) -> bool:
+    """Gemma models are served on the Gemini API but with unreliable
+    `system_instruction` support — callers must prepend the system prompt."""
+    return model.startswith("gemma")
 
 
-class GroqLLMClient:
-    """Real Groq client. Requires `GROQ_API_KEY` in the environment."""
+class GeminiLLMClient:
+    """Real Google Gemini client. Requires `GEMINI_API_KEY` in the environment."""
 
-    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
-        self.model = model or DEFAULT_GROQ_MODEL
-        # Import lazily so the package is importable without groq installed
-        # (e.g. in CI environments without the dep).
-        from groq import Groq  # type: ignore
+    def __init__(self, model: str = "gemma-4-31b-it", api_key: str | None = None) -> None:
+        # Lazily import so the package is importable without google-genai
+        # installed (e.g. static analysis). A missing key/SDK surfaces only
+        # when a real call is attempted.
+        from google import genai
+        from google.genai import types
 
-        self._client = Groq(api_key=api_key or os.environ.get("GROQ_API_KEY"))
+        self.model = model  # overridden per-call by the router
+        self._types = types
+        self._client = genai.Client(
+            api_key=api_key or os.environ.get(GEMINI_API_KEY_ENV)
+        )
 
     def chat(self, system: str, user: str, **kwargs: Any) -> LLMResult:
-        # Strip kwargs we don't pass through; useful for tests that want to
-        # override temperature but not pass it to Groq.
-        params = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": kwargs.get("temperature", 0.2),
-            "max_tokens": kwargs.get("max_tokens", 1024),
-        }
-        resp = self._client.chat.completions.create(**params)
-        text = resp.choices[0].message.content or ""
-        usage = resp.usage
+        model = kwargs.pop("model", None) or self.model
+        temperature = kwargs.get("temperature", 0.2)
+        max_tokens = kwargs.get("max_tokens", 1024)
+
+        # Gemma on the Gemini API doesn't reliably honor a separate system
+        # instruction, so fold it into the user contents for those models.
+        if _is_gemma(model):
+            contents = f"{system}\n\n{user}" if system else user
+            config = self._types.GenerateContentConfig(
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+        else:
+            contents = user
+            config = self._types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+
+        response = self._client.models.generate_content(
+            model=model, contents=contents, config=config
+        )
+
+        try:
+            text = response.text or ""
+        except Exception:
+            # Blocked / empty responses surface as ValueError on `.text`.
+            text = ""
+
+        usage = getattr(response, "usage_metadata", None)
+        prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+        completion_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+
         return LLMResult(
             text=text,
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
-            model=self.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            model=model,
         )
 
 
-# ─── Fake / deterministic implementation ───────────────────────────────────
+# ─── Per-component router ───────────────────────────────────────────────────
 
 
-class FakeLLMClient:
-    """Returns deterministic outputs based on a configured script of responses.
+class RouterLLMClient:
+    """Dispatch each `chat()` to a specific Gemini model based on `kind`.
 
-    Used by tests. Each call advances a counter; the script values cycle.
-
-    For agents that want the call to echo something useful, scripts can be
-    functions that take (system, user) and return text — that lets the test
-    assert what each primitive saw.
+    `kind` is set by primitives (their own name) and by the judge ("judge").
+    The route table maps component → model id (see `config.load_llm_routes`).
+    A single underlying Gemini client is reused across all kinds; only the
+    per-call `model` differs.
     """
 
-    def __init__(
-        self,
-        scripted_responses: list[str | None] | None = None,
-        model: str = "fake-llm",
-    ) -> None:
-        """`scripted_responses[i]` is returned on call i, cycling if exhausted.
+    def __init__(self, routes: dict[str, str], gemini_client: LLMClient) -> None:
+        self._routes = routes
+        self._gemini = gemini_client
 
-        Passing None for an entry returns a generic JSON stub. Useful for
-        agents that need non-empty output but where the content doesn't matter
-        for the test.
-        """
-        self.model = model
-        self._script = scripted_responses or []
-        self._call_count = 0
-        self.call_log: list[dict[str, Any]] = []  # inspection
+    @property
+    def model(self) -> str:
+        return "router"
 
     def chat(self, system: str, user: str, **kwargs: Any) -> LLMResult:
-        self.call_log.append({"system": system, "user": user, "kwargs": kwargs})
-        idx = self._call_count
-        self._call_count += 1
-        if self._script:
-            text = self._script[idx % len(self._script)]
-            if text is None:
-                text = json.dumps({"status": "ok"})
-        else:
-            text = json.dumps({"status": "ok"})
-        # Crude token estimate: 1 token per ~4 chars total input+output.
-        approx = (len(system) + len(user) + len(text)) // 4
-        return LLMResult(
-            text=text,
-            prompt_tokens=approx // 2,
-            completion_tokens=approx - approx // 2,
-            model=self.model,
-        )
+        kind = kwargs.pop("kind", "default")
+        model_id = self._routes.get(kind, self._routes["default"])
+        return self._gemini.chat(system, user, model=model_id, **kwargs)
 
 
 # ─── Factory ────────────────────────────────────────────────────────────────
 
 
 def get_default_llm_client() -> LLMClient:
-    """Return a working LLMClient for the current environment.
+    """Return a router wired to the per-component Gemini models.
 
-    - If GROQ_API_KEY is set → real Groq.
-    - Else → FakeLLM with generic JSON stubs (so primitives still produce
-      something useful for offline exploration).
+    Raises RuntimeError if `GEMINI_API_KEY` is not set — there is no silent
+    fallback. Set the key (e.g. via a `.env` loaded at startup) before calling.
     """
-    if os.environ.get("GROQ_API_KEY"):
-        return GroqLLMClient()
-    return FakeLLMClient()
+    if not os.environ.get(GEMINI_API_KEY_ENV):
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set. Add it to your environment (or a "
+            ".env file loaded at startup) before running ArchForge."
+        )
+    routes = load_llm_routes()
+    return RouterLLMClient(routes=routes, gemini_client=GeminiLLMClient())
+
+
+__all__ = [
+    "LLMResult",
+    "LLMClient",
+    "GeminiLLMClient",
+    "RouterLLMClient",
+    "get_default_llm_client",
+]

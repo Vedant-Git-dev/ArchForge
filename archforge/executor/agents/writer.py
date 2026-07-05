@@ -59,6 +59,7 @@ class WriterAgent:
                 "context": input.get("context", {}),
             },
             # Writer tends to run long — give it room.
+            kind=self.name,
             max_tokens=2048,
             temperature=0.3,
         )

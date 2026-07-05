@@ -19,6 +19,7 @@ from typing import Callable
 
 import yaml
 
+from ...config import DATA_DIR_ENV
 from ...core.primitive import Primitive
 from .base import BaseAgent
 from .chunker import ChunkerAgent
@@ -47,7 +48,7 @@ def default_data_dir() -> Path:
     The package sits at <project_root>/archforge/__init__.py so
     walking two parents up reaches the project root.
     """
-    override = os.environ.get("ARCHFORGE_DATA_DIR")
+    override = os.environ.get(DATA_DIR_ENV)
     if override:
         return Path(override).expanduser().resolve()
     return Path(__file__).resolve().parents[3] / "data"

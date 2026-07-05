@@ -56,6 +56,7 @@ class SummarizerAgent:
             llm,
             SYSTEM_PROMPT,
             {"input": input, "context": input.get("context", {})},
+            kind=self.name,
         )
 
 

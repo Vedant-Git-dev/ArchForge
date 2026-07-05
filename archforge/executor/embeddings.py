@@ -10,17 +10,16 @@ every CLI invocation while keeping cold-start low.
 
 from __future__ import annotations
 
-import hashlib
 import os
 from typing import Any
 
 import numpy as np
 
-# Defaults — keep tunable via env so swapping the model doesn't require
-# a code change. MiniLM-L6-v2 produces 384-dim vectors.
-DEFAULT_MODEL = os.environ.get(
-    "ARCHFORGE_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
-)
+from ..config import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODEL_ENV
+
+
+def _resolve_model_name() -> str:
+    return os.environ.get(EMBEDDING_MODEL_ENV, DEFAULT_EMBEDDING_MODEL)
 
 
 class EmbeddingClient:
@@ -30,7 +29,7 @@ class EmbeddingClient:
     """
 
     def __init__(self, model_name: str | None = None, normalize: bool = True) -> None:
-        self.model_name = model_name or DEFAULT_MODEL
+        self.model_name = model_name or _resolve_model_name()
         self.normalize = normalize
         self._model: Any | None = None  # set on first embed()
         self._dim: int | None = None
@@ -38,7 +37,7 @@ class EmbeddingClient:
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
-        from sentence_transformers import SentenceTransformer  # type: ignore
+        from sentence_transformers import SentenceTransformer  
 
         self._model = SentenceTransformer(self.model_name)
         self._dim = int(self._model.get_embedding_dimension())
@@ -68,77 +67,17 @@ class EmbeddingClient:
         return self.embed([text])[0]
 
 
-# ─── Cached fallback (deterministic, offline) ───────────────────────────────
-
-
-class HashingEmbeddingClient:
-    """Deterministic, dependency-free embedding.
-
-    Used when sentence-transformers isn't installed or for offline testing.
-    Produces 256-dim vectors via token hashing — *not* semantically meaningful,
-    but stable and zero-dep, so callers can still exercise the full pipeline.
-
-    Pretty much only useful to prove the wiring works without a real model.
-    Phase 1 keeps it as a fallback; production paths should use EmbeddingClient.
-    """
-
-    DIM = 256
-
-    def __init__(self, normalize: bool = True) -> None:
-        self.model_name = "hashing-fallback"
-        self.normalize = normalize
-
-    @property
-    def dim(self) -> int:
-        return self.DIM
-
-    def _hash_token(self, token: str, seed: int) -> np.ndarray:
-        h = hashlib.sha256(f"{seed}:{token}".encode("utf-8")).digest()
-        # 32 bytes -> 256 bits, mapped to +/-1 floats
-        bits = np.frombuffer(h, dtype=np.uint8)
-        # Expand to 256 dims: replicate the 32 bytes into 8 lanes
-        out = np.zeros(self.DIM, dtype=np.float32)
-        for i in range(8):
-            out[i * 32 : (i + 1) * 32] = (bits.astype(np.float32) - 127.5) / 127.5
-        return out
-
-    def embed(self, texts: list[str]) -> np.ndarray:
-        if not texts:
-            return np.zeros((0, self.DIM), dtype=np.float32)
-        out = np.zeros((len(texts), self.DIM), dtype=np.float32)
-        for i, t in enumerate(texts):
-            for token in t.lower().split():
-                out[i] += self._hash_token(token, 0)
-                out[i] += self._hash_token(token, 1)
-            if self.normalize:
-                n = np.linalg.norm(out[i])
-                if n > 0:
-                    out[i] /= n
-        return out
-
-    def embed_one(self, text: str) -> np.ndarray:
-        return self.embed([text])[0]
-
-
 # ─── Factory ────────────────────────────────────────────────────────────────
 
 
-def get_default_embedding_client(
-    force_name: str | None = None,
-) -> EmbeddingClient | HashingEmbeddingClient:
-    """Return an embedding client for the current environment.
+def get_default_embedding_client() -> EmbeddingClient:
+    """Return the embedding client for the current environment.
 
-    Prefers sentence-transformers (all-MiniLM-L6-v2 by default).
-    Falls back to HashingEmbeddingClient if the library isn't available
-    — useful for tests that don't want the ~80 MB model download.
-
-    Tests can also pass `force_name="hashing"` to skip the heavy model
-    entirely.
+    Production uses sentence-transformers (all-MiniLM-L6-v2 by default).
+    There is no silent fallback — a missing `sentence-transformers` library
+    surfaces as ImportError on first `.dim` / `.embed` call.
     """
-    name = force_name or os.environ.get("ARCHFORGE_EMBEDDING_MODEL", DEFAULT_MODEL)
-    if name == "hashing":
-        return HashingEmbeddingClient()
-    try:
-        return EmbeddingClient(model_name=name)
-    except Exception:
-        return HashingEmbeddingClient()
+    return EmbeddingClient()
+
+
+__all__ = ["EmbeddingClient", "get_default_embedding_client"]

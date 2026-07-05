@@ -59,6 +59,7 @@ class FactCheckerAgent:
                 "evidence": input.get("evidence", input.get("text", "")),
                 "context": input.get("context", {}),
             },
+            kind=self.name,
         )
 
 

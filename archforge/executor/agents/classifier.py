@@ -53,6 +53,7 @@ class ClassifierAgent:
             llm,
             SYSTEM_PROMPT,
             {"items": items, "context": input.get("context", {})},
+            kind=self.name,
         )
 
 

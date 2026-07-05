@@ -48,6 +48,7 @@ class ReaderAgent:
             llm,
             SYSTEM_PROMPT,
             {"input": input.get("input", ""), "context": input.get("context", {})},
+            kind=self.name,
         )
 
 

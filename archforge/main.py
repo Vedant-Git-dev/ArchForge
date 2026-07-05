@@ -20,6 +20,7 @@ import click
 from dotenv import load_dotenv
 
 from .architect.designer import Architect
+from .config import data_dir as _config_data_dir
 from .core.experience import Experience, StructuralScores
 from .core.task import Task
 from .evaluator.output import OutputEvaluator
@@ -33,7 +34,7 @@ from .store.experience_store import ExperienceStore
 
 
 def _data_dir() -> str:
-    return os.environ.get("ARCHFORGE_DATA_DIR") or "data"
+    return _config_data_dir()
 
 
 def _experiences_dir() -> str:
@@ -51,7 +52,7 @@ def _new_exp_id() -> str:
 @click.version_option(package_name="archforge")
 def cli() -> None:
     """ArchForge — self-learning multi-agent pipeline builder."""
-    # Load a .env from the project root / cwd if present, so GROQ_API_KEY and
+    # Load a .env from the project root / cwd if present, so GEMINI_API_KEY and
     # the ARCHFORGE_* knobs work without manually exporting them. Existing
     # real env vars always win (load_dotenv does not override by default).
     load_dotenv()

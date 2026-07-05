@@ -99,6 +99,7 @@ def call_llm_json(
     system_prompt: str,
     payload: dict[str, Any],
     *,
+    kind: str = "default",
     max_tokens: int = 1024,
     temperature: float = 0.2,
 ) -> AgentResult:
@@ -107,11 +108,15 @@ def call_llm_json(
     Sends payload as JSON, parses the response as JSON, returns both.
     Centralising this means primitive definitions stay short — each one
     is just (Primitive + system prompt + the run() mapping for input).
+
+    `kind` identifies which component is calling, so the router can pick
+    the per-component model from `config.DEFAULT_LLM_ROUTES`.
     """
     user_msg = json.dumps(payload, ensure_ascii=False)
     result: LLMResult = llm.chat(
         system=system_prompt,
         user=user_msg,
+        kind=kind,
         max_tokens=max_tokens,
         temperature=temperature,
     )

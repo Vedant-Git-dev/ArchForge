@@ -15,6 +15,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..config import (
+    COST_BUDGET_TOKENS,
+    COST_PENALTY_FLOOR,
+    SPEED_SLA_SECONDS,
+    SPEED_PENALTY_FLOOR,
+)
 from ..core.experience import OutputScores
 from ..core.task import Task
 from ..executor.engine import PipelineResult
@@ -37,12 +43,9 @@ redundancy) — only the OUTPUT the user would see.
 """
 
 
-# Soft SLA / budget. Tunable; conservative defaults for Phase 1.
-SPEED_SLA_SECONDS = 5.0  # at or below: full credit
-SPEED_PENALTY_FLOOR = 60.0  # at or above: zero credit
-
-COST_BUDGET_TOKENS = 500  # at or below: full credit
-COST_PENALTY_FLOOR = 8000  # at or above: zero credit
+# Soft SLA / budget values are centralized in `archforge.config` and
+# re-imported above — see SPEED_SLA_SECONDS, SPEED_PENALTY_FLOOR,
+# COST_BUDGET_TOKENS, COST_PENALTY_FLOOR.
 
 
 def _normalize(value: float, low: float, high: float, *, lower_is_better: bool) -> float:
@@ -117,6 +120,7 @@ class OutputEvaluator:
         response = self.llm.chat(
             system=JUDGE_PROMPT,
             user=user_msg,
+            kind="judge",
             temperature=0.0,
             max_tokens=512,
         )

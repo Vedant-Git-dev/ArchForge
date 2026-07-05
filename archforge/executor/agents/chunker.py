@@ -55,6 +55,7 @@ class ChunkerAgent:
             llm,
             SYSTEM_PROMPT,
             {"input": text, "context": input.get("context", {})},
+            kind=self.name,
         )
 
 

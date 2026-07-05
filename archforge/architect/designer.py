@@ -20,24 +20,11 @@ from ..core.experience import Experience
 from ..core.pipeline import PipelineDAG
 from ..core.task import Task
 from ..store.experience_store import ExperienceStore, ScoredHit
-from ..executor.embeddings import EmbeddingClient, HashingEmbeddingClient
-
-
-# Phase 1 default linear pipeline — applied when retrieval falls through.
-DEFAULT_PIPELINE_AGENTS: list[str] = [
-    "reader",
-    "chunker",
-    "classifier",
-    "summarizer",
-    "fact_checker",
-    "writer",
-]
-
-
-# Heuristic: how similar does a past experience need to be before the
-# Architect replays it instead of building from scratch?
-# Phase 1 uses a fixed 0.5 threshold. Phase 6 may learn this per task type.
-DEFAULT_REPLAY_SIMILARITY_THRESHOLD = 0.5
+from ..executor.embeddings import EmbeddingClient
+from ..config import (
+    DEFAULT_PIPELINE_AGENTS,
+    DEFAULT_REPLAY_SIMILARITY_THRESHOLD,
+)
 
 
 @dataclass
@@ -65,7 +52,7 @@ class Architect:
     def __init__(
         self,
         store: ExperienceStore,
-        embedder: EmbeddingClient | HashingEmbeddingClient,
+        embedder: EmbeddingClient,
         *,
         replay_similarity_threshold: float = DEFAULT_REPLAY_SIMILARITY_THRESHOLD,
         top_k: int = 5,
