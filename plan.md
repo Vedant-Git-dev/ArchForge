@@ -1,4 +1,4 @@
-# SelfLearner — Adaptive Pipeline Builder
+# ArchForge — Adaptive Pipeline Builder
 
 A self-learning multi-agent system that assembles, evaluates, diagnoses, and evolves task pipelines. The system learns which agent compositions work for which tasks, invents new primitive agents by compressing frequent subgraphs, and improves its own architecture over time.
 
@@ -668,8 +668,8 @@ class Template:
 - Architect: retrieves best past pipeline, applies it as-is (no mutation)
 
 **Deliverables**:
-- `selflearner/` package with working end-to-end
-- CLI: `selflearner run "summarize this file"` → output + score
+- `archforge/` package with working end-to-end
+- CLI: `archforge run "summarize this file"` → output + score
 - 5 test tasks that demonstrate retrieval learning (same task type, second run uses prior experience)
 
 **Verify**:
@@ -822,11 +822,11 @@ class Template:
 ## Folder Structure
 
 ```
-selflearner/
+archforge/
 ├── README.md
 ├── plan.md                    # this file
 ├── pyproject.toml
-├── selflearner/
+├── archforge/
 │   ├── __init__.py
 │   ├── main.py                # CLI entry point
 │   │
