@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ...core.primitive import Primitive
+from ...logging import get_logger
 from ..llm import LLMClient, LLMResult
+
+log = get_logger("agent")
 
 
 @dataclass
@@ -113,6 +116,13 @@ def call_llm_json(
     the per-component model from `config.DEFAULT_LLM_ROUTES`.
     """
     user_msg = json.dumps(payload, ensure_ascii=False)
+    # Sentinel for payload bloat / accidental duplication: the engine's
+    # per-node merge can re-inject upstream fields an agent doesn't need.
+    # `user_chars` is the size the model actually receives.
+    log.debug(
+        "call_llm_json: kind=%s payload_keys=%s user_chars=%d",
+        kind, list(payload.keys()), len(user_msg),
+    )
     result: LLMResult = llm.chat(
         system=system_prompt,
         user=user_msg,

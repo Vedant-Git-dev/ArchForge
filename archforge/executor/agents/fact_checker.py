@@ -5,8 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from ...core.primitive import Primitive
+from ...logging import get_logger
 from ..llm import LLMClient
 from .base import AgentResult, BaseAgent, call_llm_json
+
+log = get_logger("agent.fact_checker")
 
 
 SYSTEM_PROMPT = """\
@@ -49,14 +52,42 @@ class FactCheckerAgent:
         )
 
     def run(self, input: dict[str, Any], llm: LLMClient) -> AgentResult:
-        # The fact_checker accepts claims + evidence from upstream.
-        # Phase 1 callers usually pass {"claims":[...], "evidence": "..."}.
+        # Claims to verify. A well-formed upstream (an explicit `claims`
+        # source, or the summarizer) hands us concrete claims; otherwise we
+        # derive them from the summarizer's `key_points`, or from its
+        # `summary` string as a single claim. Evidence is the source text
+        # the claims were drawn from — the engine carries the original input
+        # as `input`, with upstream `text` as a fallback. When the pipeline
+        # topology supplies neither, we run on empty and the warnings below
+        # make that loss visible instead of silent.
+        claims = input.get("claims")
+        if not claims:
+            claims = input.get("key_points") or (
+                [input["summary"]] if input.get("summary") else []
+            )
+        evidence = input.get("evidence")
+        if not evidence:
+            evidence = input.get("input") or input.get("text") or ""
+
+        if not claims:
+            log.warning(
+                "fact_checker: no claims to verify (input_keys=%s); expected "
+                "claims/key_points/summary from upstream",
+                list(input.keys()),
+            )
+        if not evidence:
+            log.warning(
+                "fact_checker: no evidence source (input_keys=%s); expected "
+                "evidence/input/text to carry the source text",
+                list(input.keys()),
+            )
+
         return call_llm_json(
             llm,
             SYSTEM_PROMPT,
             {
-                "claims": input.get("claims", []),
-                "evidence": input.get("evidence", input.get("text", "")),
+                "claims": claims,
+                "evidence": evidence,
                 "context": input.get("context", {}),
             },
             kind=self.name,

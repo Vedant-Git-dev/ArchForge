@@ -56,7 +56,7 @@ def _new_exp_id() -> str:
 @click.version_option(package_name="archforge")
 def cli() -> None:
     """ArchForge — self-learning multi-agent pipeline builder."""
-    # Load a .env from the project root / cwd if present, so GEMINI_API_KEY and
+    # Load a .env from the project root / cwd if present, so GROQ_API_KEY and
     # the ARCHFORGE_* knobs work without manually exporting them. Existing
     # real env vars always win (load_dotenv does not override by default).
     load_dotenv()

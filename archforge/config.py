@@ -5,10 +5,9 @@ routing table lives here. The rest of the package imports from this module;
 a few modules re-export values they own for backward compatibility (so the
 public import paths used by tests do not change).
 
-There is exactly one LLM provider (Google Gemini, via the `google-genai`
-SDK). Each pipeline component + the judge routes to a specific model id
-keyed by its own name. Per-component overrides are read from
-`ARCHFORGE_LLM_<COMPONENT>` env vars.
+There is exactly one LLM provider (Groq, via the `groq` SDK). Each pipeline
+component + the judge routes to a specific model id keyed by its own name.
+Per-component overrides are read from `ARCHFORGE_LLM_<COMPONENT>` env vars.
 """
 
 from __future__ import annotations
@@ -32,24 +31,30 @@ EMBEDDING_MODEL_ENV = "ARCHFORGE_EMBEDDING_MODEL"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
-# ─── Gemini API ───────────────────────────────────────────────────────────
+# ─── Groq API ───────────────────────────────────────────────────────────────
 
-GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
+GROQ_API_KEY_ENV = "GROQ_API_KEY"
 
 # Per-component model routing. Keys are the actual component names that
 # primitives/knobs identify themselves with; values are literal model-id
-# strings on the Gemini API. `default` is the fallback when a caller
+# strings on the Groq API. `default` is the fallback when a caller
 # omits `kind`. Override any single component via
 # `ARCHFORGE_LLM_<COMPONENT.toUpperCase>`.
+#
+# Light ingest/transform stages (reader, chunker) run on the fast, cheap
+# llama-3.1-8b-instant; the analyser/validator/generator stages and the
+# judge run on the stronger llama-3.3-70b-versatile. This mirrors the
+# small/large split the Gemini config used, so quality-bearing components
+# keep the heavier model. Every entry is overridable per-component via env.
 DEFAULT_LLM_ROUTES: dict[str, str] = {
-    "reader": "gemini-3.1-flash-lite",
-    "chunker": "gemini-3.1-flash-lite",
-    "classifier": "gemma-4-31b-it",
-    "summarizer": "gemma-4-31b-it",
-    "fact_checker": "gemma-4-31b-it",
-    "writer": "gemma-4-31b-it",
-    "judge": "gemma-4-31b-it",
-    "default": "gemma-4-31b-it",
+    "reader": "llama-3.1-8b-instant",
+    "chunker": "llama-3.1-8b-instant",
+    "classifier": "llama-3.3-70b-versatile",
+    "summarizer": "llama-3.3-70b-versatile",
+    "fact_checker": "llama-3.3-70b-versatile",
+    "writer": "llama-3.3-70b-versatile",
+    "judge": "llama-3.3-70b-versatile",
+    "default": "llama-3.3-70b-versatile",
 }
 
 
@@ -113,7 +118,7 @@ __all__ = [
     "data_dir",
     "EMBEDDING_MODEL_ENV",
     "DEFAULT_EMBEDDING_MODEL",
-    "GEMINI_API_KEY_ENV",
+    "GROQ_API_KEY_ENV",
     "DEFAULT_LLM_ROUTES",
     "load_llm_routes",
     "DEFAULT_PIPELINE_AGENTS",

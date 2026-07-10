@@ -5,8 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from ...core.primitive import Primitive
+from ...logging import get_logger
 from ..llm import LLMClient
 from .base import AgentResult, BaseAgent, call_llm_json
+
+log = get_logger("agent.writer")
 
 
 SYSTEM_PROMPT = """\
@@ -50,12 +53,32 @@ class WriterAgent:
         )
 
     def run(self, input: dict[str, Any], llm: LLMClient) -> AgentResult:
+        # Evidence: integrate the predecessor's full output, not a single
+        # `evidence` key (no upstream agent emits one — without this, the
+        # writer composes the final answer from {}). Strip the engine's base
+        # fields so we forward upstream *results*, not a second copy of the
+        # task metadata. Fall back to the original source text only when
+        # upstream produced nothing usable.
+        base_keys = {"task", "task_type", "input", "context"}
+        evidence = input.get("evidence")
+        if not evidence:
+            evidence = {k: v for k, v in input.items() if k not in base_keys}
+            if not evidence and input.get("input"):
+                evidence = {"source_text": input["input"]}
+
+        if not evidence:
+            log.warning(
+                "writer: no upstream evidence (input_keys=%s); expected the "
+                "predecessor's output to supply the material to compose from",
+                list(input.keys()),
+            )
+
         return call_llm_json(
             llm,
             SYSTEM_PROMPT,
             {
                 "task": input.get("task", ""),
-                "evidence": input.get("evidence", {}),
+                "evidence": evidence,
                 "context": input.get("context", {}),
             },
             # Writer tends to run long — give it room.

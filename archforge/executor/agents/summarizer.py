@@ -52,10 +52,19 @@ class SummarizerAgent:
         )
 
     def run(self, input: dict[str, Any], llm: LLMClient) -> AgentResult:
+        # Forward only the predecessor's salient output, not the whole merged
+        # bag. The engine merges a `base` (task / task_type / raw `input` /
+        # context) into every node's input so terminal agents can still see
+        # the task — but a summarizer summarises what came IN, so re-sending
+        # the original text + task string + context (then again, below) is
+        # needless duplication. Strip the base keys; fall back to the whole
+        # dict only if the predecessor produced nothing usable.
+        base_keys = {"task", "task_type", "input", "context"}
+        upstream = {k: v for k, v in input.items() if k not in base_keys}
         return call_llm_json(
             llm,
             SYSTEM_PROMPT,
-            {"input": input, "context": input.get("context", {})},
+            {"input": upstream or input, "context": input.get("context", {})},
             kind=self.name,
         )
 
