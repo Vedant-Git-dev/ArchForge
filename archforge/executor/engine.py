@@ -14,9 +14,12 @@ from typing import Any
 
 from ..core.pipeline import AgentNode, PipelineDAG
 from ..core.task import Task
+from ..logging import get_logger
 from .agents.base import AgentResult
 from .agents.registry import PrimitivePool, default_pool
 from .llm import LLMClient
+
+log = get_logger("engine")
 
 
 @dataclass
@@ -126,9 +129,14 @@ class Engine:
         outer_input: str = "",
     ) -> PipelineResult:
         if pipeline.has_cycle():
+            log.error("run: refusing cyclic pipeline id=%s", pipeline.id)
             raise ValueError(f"Pipeline {pipeline.id} has a cycle; refusing to execute")
 
         order = pipeline.topo_order()
+        log.info(
+            "run: pipeline id=%s nodes=%d order=%s",
+            pipeline.id, len(order), [n.agent_type for n in order],
+        )
         wall_start = time.perf_counter()
 
         node_outputs: dict[str, AgentResult] = {}
@@ -138,7 +146,7 @@ class Engine:
         total_prompt = 0
         total_completion = 0
 
-        for node in order:
+        for i, node in enumerate(order):
             # Assemble predecessors' outputs for THIS node only.
             preds = pipeline.predecessors(node.id)
             pred_outputs_for_node: dict[str, dict[str, Any]] = {}
@@ -149,6 +157,10 @@ class Engine:
             payload = _build_node_input(node, pred_outputs_for_node, task, outer_input)
 
             agent = self.pool.get(node.agent_type)
+            log.info(
+                "run: node %d/%d start id=%s agent=%s preds=%s",
+                i + 1, len(order), node.id, node.agent_type, [p.id for p in preds],
+            )
             t0 = time.perf_counter()
             result = agent.run(payload, self.llm)
             dt = time.perf_counter() - t0
@@ -156,6 +168,16 @@ class Engine:
             node_outputs[node.id] = result
             total_prompt += result.prompt_tokens
             total_completion += result.completion_tokens
+
+            log.info(
+                "run: node %d/%d done  id=%s agent=%s %.0fms tokens=%d (p=%d c=%d) model=%s",
+                i + 1, len(order), node.id, node.agent_type, dt * 1000, result.total_tokens,
+                result.prompt_tokens, result.completion_tokens, result.model,
+            )
+            log.debug(
+                "run: node id=%s output_keys=%s",
+                node.id, sorted(result.output.keys()),
+            )
 
             traces.append(NodeTrace(
                 node_id=node.id,
@@ -170,6 +192,10 @@ class Engine:
 
         wall_dt = time.perf_counter() - wall_start
         final_output = _extract_final_output(node_outputs, pipeline)
+        log.info(
+            "run: pipeline done id=%s wall=%.3fs tokens=%d final_len=%d",
+            pipeline.id, wall_dt, total_prompt + total_completion, len(final_output),
+        )
 
         return PipelineResult(
             final_output=final_output,

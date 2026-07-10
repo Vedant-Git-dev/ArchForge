@@ -15,7 +15,10 @@ from typing import Iterator
 import numpy as np
 
 from ..core.experience import Experience
+from ..logging import get_logger
 from .task_index import TaskIndex
+
+log = get_logger("store")
 
 
 @dataclass
@@ -44,6 +47,7 @@ class ExperienceStore:
         self._id_to_idx: dict[str, int] = {}
         self.index = TaskIndex.load(self.dirpath, dim=dim)
         self._load_file()
+        log.debug("ExperienceStore init dir=%s dim=%d loaded=%d", self.dirpath, dim, len(self))
 
     # ----- persistence -----
 
@@ -76,7 +80,8 @@ class ExperienceStore:
     # ----- mutation -----
 
     def append(self, exp: Experience) -> None:
-        if exp.id in self._id_to_idx:
+        is_rewrite = exp.id in self._id_to_idx
+        if is_rewrite:
             # Idempotent re-write of same experience: replace in-place.
             idx = self._id_to_idx[exp.id]
             self._experiences[idx] = exp
@@ -84,6 +89,10 @@ class ExperienceStore:
             self._id_to_idx[exp.id] = len(self._experiences)
             self._experiences.append(exp)
         self._append_file(exp)
+        log.info(
+            "append: experience id=%s composite=%.3f tokens=%d (rewrite=%s total=%d)",
+            exp.id, exp.composite_score, exp.token_estimate, is_rewrite, len(self),
+        )
 
     def recompute_embeddings(self, embedder) -> int:
         """Fill any missing task embeddings from descriptions.
@@ -156,6 +165,7 @@ class ExperienceStore:
 
     def save_index(self) -> None:
         self.index.save(self.dirpath)
+        log.info("save_index: persisted task index (entries=%d dir=%s)", len(self), self.dirpath)
 
 
 __all__ = ["ExperienceStore", "ScoredHit"]

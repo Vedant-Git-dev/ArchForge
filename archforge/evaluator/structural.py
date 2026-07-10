@@ -31,6 +31,9 @@ from ..config import (
 )
 from ..core.experience import StructuralScores
 from ..core.pipeline import AgentNode, PipelineDAG
+from ..logging import get_logger
+
+log = get_logger("evaluator.structural")
 
 
 def _terminal_node(pipeline: PipelineDAG) -> AgentNode | None:
@@ -105,6 +108,7 @@ class StructuralEvaluator:
             # Empty has nothing to measure; a cyclic pipeline never reaches
             # here in practice (the engine refuses to execute it), but we
             # return the zero default defensively rather than raising.
+            log.debug("evaluate: empty/cyclic pipeline (nodes=%d) → zero scores", n)
             return StructuralScores()
 
         critical_path = pipeline.critical_path()
@@ -124,6 +128,13 @@ class StructuralEvaluator:
             1.0
             - STRUCTURAL_UNUSED_PENALTY * len(unused)
             - STRUCTURAL_REDUNDANT_PENALTY * len(redundant),
+        )
+
+        log.info(
+            "evaluate: pipeline id=%s len=%d crit_path=%d depth=%d parallelism=%.3f"
+            " unused=%d redundant=%d score=%.3f",
+            pipeline.id, n, critical_path_length, dependency_depth, parallelism_ratio,
+            len(unused), len(redundant), score,
         )
 
         return StructuralScores(

@@ -25,6 +25,9 @@ from ..config import (
     DEFAULT_PIPELINE_AGENTS,
     DEFAULT_REPLAY_SIMILARITY_THRESHOLD,
 )
+from ..logging import get_logger
+
+log = get_logger("architect")
 
 
 @dataclass
@@ -66,21 +69,35 @@ class Architect:
 
     def compose(self, task: Task) -> ArchitectureDecision:
         """Return the PipelineDAG the executor should run for `task`."""
+        log.info("compose start: task id=%s type=%r", task.id, task.type)
 
         # Embed the task. Description + type provides a stable signal even
         # for tasks with empty metadata.
         text = self._task_text(task)
+        log.debug("compose: embedding task text (len=%d)", len(text))
         embedding = self.embedder.embed_one(text)
         task.embedding = np.asarray(embedding, dtype=np.float32).reshape(-1).tolist()
+        log.debug("compose: task embedded (dim=%d)", len(task.embedding))
 
         # Make sure any prior experiences without embeddings are filled in
         # before we run the kNN search.
-        self.store.recompute_embeddings(self.embedder)
+        n_recomputed = self.store.recompute_embeddings(self.embedder)
+        if n_recomputed:
+            log.info("compose: recomputed %d missing task embeddings", n_recomputed)
 
         # Search by task similarity.
+        log.info("compose: kNN search (top_k=%d threshold=%.2f)", self.top_k, self.threshold)
         hits: list[ScoredHit] = self.store.search_by_task(
             np.asarray(embedding, dtype=np.float32).reshape(-1), k=self.top_k
         )
+        if hits:
+            top = hits[0]
+            log.debug(
+                "compose: nearest neighbour id=%s cosine=%.3f rank=%d",
+                top.experience.id, top.score, top.rank,
+            )
+        else:
+            log.debug("compose: no neighbours in index (store empty)")
 
         # Pick the best-scoring experience whose similarity clears the bar.
         replayable = [h for h in hits if h.score >= self.threshold and h.experience.pipeline.nodes]
@@ -88,6 +105,10 @@ class Architect:
             best = max(replayable, key=lambda h: h.experience.composite_score)
             pipeline = PipelineDAG.from_dict(best.experience.pipeline.to_dict())
             pipeline.fingerprint = pipeline.compute_fingerprint()
+            log.info(
+                "compose: retrieval HIT — replaying experience id=%s cosine=%.3f prior_score=%.3f",
+                best.experience.id, best.score, best.experience.composite_score,
+            )
             return ArchitectureDecision(
                 pipeline=pipeline,
                 triggered_from="retrieval",
@@ -99,6 +120,10 @@ class Architect:
 
         # No usable hit — build the default pipeline.
         pipeline = PipelineDAG.linear(DEFAULT_PIPELINE_AGENTS)
+        log.info(
+            "compose: retrieval MISS (candidates=%d, replayable=0) — default pipeline %s",
+            len(hits), [n.agent_type for n in pipeline.nodes],
+        )
         return ArchitectureDecision(
             pipeline=pipeline,
             triggered_from="default",

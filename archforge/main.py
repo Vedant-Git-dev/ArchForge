@@ -28,7 +28,10 @@ from .evaluator.structural import StructuralEvaluator
 from .executor.embeddings import get_default_embedding_client
 from .executor.engine import Engine
 from .executor.llm import get_default_llm_client
+from .logging import configure_logging, get_logger
 from .store.experience_store import ExperienceStore
+
+log = get_logger("main")
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -84,30 +87,49 @@ def run_cmd(
         click.echo("Task description cannot be empty.", err=True)
         sys.exit(2)
 
+    # Configure logging: --verbose / -v bumps to DEBUG; otherwise INFO unless
+    # ARCHFORGE_LOG_LEVEL is set (configure_logging honours the env var when
+    # level is None).
+    configure_logging("DEBUG" if verbose else None)
+    log.info("run_cmd start: task_type=%r description=%r", task_type, desc)
+
     data_dir = data_dir or _data_dir()
     exp_dir = os.path.join(data_dir, "experiences")
 
     # 1. Build embedding + llm clients.
+    log.info("step 1/8: building embedding + LLM clients")
     embedder = get_default_embedding_client()
     llm = get_default_llm_client()
+    log.debug("step 1/8: embedder dim=%s", getattr(embedder, "dim", 384))
 
     # 2. Load experience store. Need the embedding dim first.
     dim = getattr(embedder, "dim", 384)
     store = ExperienceStore(dirpath=exp_dir, dim=dim)
+    log.info("step 2/8: experience store loaded (dir=%s dim=%d existing=%d)", exp_dir, dim, len(store))
 
     # 3. Build the Architect.
     architect = Architect(store=store, embedder=embedder)
+    log.info("step 3/8: architect ready")
 
     # 4. Compose a pipeline for the task.
     task = Task.new(desc, type=task_type)
     if input_text:
         task.metadata["initial_input"] = input_text
+    log.info("step 4/8: composing pipeline for task id=%s", task.id)
 
     click.echo(
         f"→ Architect: composing pipeline for {task.type!r} task...",
         err=True,
     )
     decision = architect.compose(task)
+    log.info(
+        "step 4/8: decision=%s pipeline_id=%s nodes=%s %s",
+        decision.triggered_from,
+        decision.pipeline.id,
+        [n.agent_type for n in decision.pipeline.nodes],
+        f"matched_exp={decision.matched_experience_id} prior_score={decision.matched_pipeline_score:.3f}"
+        if decision.matched_experience_id else "no-match",
+    )
     if decision.triggered_from == "retrieval":
         click.echo(
             f"  Replaying pipeline from experience {decision.matched_experience_id} "
@@ -121,7 +143,15 @@ def run_cmd(
     click.echo("→ Executing pipeline...", err=True)
     engine = Engine(llm=llm)
     pipeline_input = input_text or task.description
+    log.info("step 5/8: executing pipeline (outer_input_len=%d)", len(pipeline_input))
     result = engine.run(decision.pipeline, task, outer_input=pipeline_input)
+    log.info(
+        "step 5/8: execution done nodes=%d wall=%.3fs tokens=%d final_len=%d",
+        len(result.traces),
+        result.wall_time_seconds,
+        result.total_tokens,
+        len(result.final_output),
+    )
 
     if verbose:
         for trace in result.traces:
@@ -134,9 +164,15 @@ def run_cmd(
     # 6. Evaluate.
     click.echo("→ Evaluating...", err=True)
     evaluator = OutputEvaluator(llm=llm)
+    log.info("step 6/8: evaluating output quality")
     output = evaluator.evaluate(task, result)
+    log.info(
+        "step 6/8: scores accuracy=%.3f completeness=%.3f speed=%.3f cost=%.3f",
+        output.accuracy, output.completeness, output.speed_normalized, output.cost_normalized,
+    )
 
     # 7. Compute composite + persist.
+    log.info("step 7/8: computing structural metrics + composite score")
     exp = Experience(
         id=_new_exp_id(),
         task=task,
@@ -152,14 +188,23 @@ def run_cmd(
     exp.final_output = result.final_output
     exp.composite_score = exp.compute_composite()
     exp.timestamp = datetime.now(timezone.utc)
+    log.info(
+        "step 7/8: composite=%.3f structural=%.3f critical_path=%d parallelism=%.3f",
+        exp.composite_score, exp.structural.score,
+        exp.structural.critical_path_length, exp.structural.parallelism_ratio,
+    )
 
     if not no_store:
+        log.info("step 7/8: persisting experience id=%s", exp.id)
         store.append(exp)
         # Re-save index after append so the next invocation has it.
         try:
             store.save_index()
         except Exception as e:  # noqa: BLE001 — persistence failure shouldn't crash the run
+            log.warning("step 7/8: failed to save index: %s", e)
             click.echo(f"  (warning: failed to save index: {e})", err=True)
+    else:
+        log.info("step 7/8: --no-store set, skipping persistence")
 
     # 8. Print to user.
     click.echo("")
@@ -181,6 +226,7 @@ def run_cmd(
         "trigger": decision.triggered_from,
     }
     click.echo(json.dumps(summary, indent=2))
+    log.info("step 8/8: run_cmd complete (exp=%s)", exp.id)
 
 
 @cli.command("inspect")
@@ -188,6 +234,8 @@ def run_cmd(
 @click.option("--last", "last_n", default=5, help="Show the most recent N experiences.")
 def inspect_cmd(data_dir: str | None, last_n: int) -> None:
     """List recent experiences (for debugging / manual inspection)."""
+    configure_logging()
+    log.info("inspect_cmd start (last=%d)", last_n)
     data_dir = data_dir or _data_dir()
     exp_dir = os.path.join(data_dir, "experiences")
     embedder = get_default_embedding_client()

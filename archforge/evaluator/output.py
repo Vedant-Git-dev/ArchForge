@@ -25,6 +25,9 @@ from ..core.experience import OutputScores
 from ..core.task import Task
 from ..executor.engine import PipelineResult
 from ..executor.llm import LLMClient
+from ..logging import get_logger
+
+log = get_logger("evaluator.output")
 
 
 JUDGE_PROMPT = """\
@@ -94,6 +97,10 @@ class OutputEvaluator:
         cost = _normalize(
             result.total_tokens, COST_BUDGET_TOKENS, COST_PENALTY_FLOOR, lower_is_better=True
         )
+        log.info(
+            "evaluate: judge accuracy=%.3f completeness=%.3f | speed=%.3f (wall=%.3fs) cost=%.3f (tok=%d)",
+            accuracy, completeness, speed, result.wall_time_seconds, cost, result.total_tokens,
+        )
 
         return OutputScores(
             accuracy=accuracy,
@@ -117,6 +124,7 @@ class OutputEvaluator:
             },
         }
         user_msg = json.dumps(payload, ensure_ascii=False)
+        log.debug("evaluate: invoking judge (output_len=%d)", len(result.final_output))
         response = self.llm.chat(
             system=JUDGE_PROMPT,
             user=user_msg,
@@ -125,6 +133,9 @@ class OutputEvaluator:
             max_tokens=512,
         )
         data = self._parse_judge(response.text)
+        if data.get("rationale") == "judge parse failed":
+            log.warning("evaluate: judge response failed to parse; using midpoint fallback")
+        log.debug("evaluate: judge returned %d chars", len(response.text))
         return (
             float(data.get("accuracy", 0.0)),
             float(data.get("completeness", 0.0)),
