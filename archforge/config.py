@@ -96,6 +96,17 @@ COST_BUDGET_TOKENS = 500
 COST_PENALTY_FLOOR = 8000
 
 
+# ─── Structural evaluation (Phase 2) ──────────────────────────────────────────
+
+# Baseline structural-score penalties, per plan.md "Structural Evaluation".
+# A 1.0 baseline is charged against the two unambiguously-bad defects; a
+# learned ideal structural profile per task type (deviation from ideal) lands
+# in Phase 6 weight learning. For now the score is the plan's hard-constraint
+# penalties alone.
+STRUCTURAL_UNUSED_PENALTY = 0.10   # per dead-output leaf (output no one reads)
+STRUCTURAL_REDUNDANT_PENALTY = 0.15  # per structurally-duplicate agent
+
+
 __all__ = [
     "DATA_DIR_ENV",
     "DEFAULT_DATA_DIR",
@@ -111,4 +122,6 @@ __all__ = [
     "SPEED_PENALTY_FLOOR",
     "COST_BUDGET_TOKENS",
     "COST_PENALTY_FLOOR",
+    "STRUCTURAL_UNUSED_PENALTY",
+    "STRUCTURAL_REDUNDANT_PENALTY",
 ]

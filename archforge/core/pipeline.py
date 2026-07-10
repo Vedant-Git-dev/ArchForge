@@ -199,6 +199,50 @@ class PipelineDAG:
 
         return max(depth(n.id) for n in self.nodes)
 
+    def critical_path(self) -> list[AgentNode]:
+        """Longest root→leaf path (by node count). Returns the node list.
+
+        Phase 2 structural evaluation uses this to define the "critical
+        path" — the serial chain that bounds the pipeline's wall-clock
+        time regardless of how wide the rest of the DAG fans out.
+
+        Raises ValueError if the DAG has a cycle (via topo_order); callers
+        that may receive unvalidated pipelines should check has_cycle first.
+        """
+        if not self.nodes:
+            return []
+        order = self.topo_order()
+        best: dict[str, int] = {}
+        parent: dict[str, str | None] = {n.id: None for n in self.nodes}
+        for node in order:
+            preds = self.predecessors(node.id)
+            if not preds:
+                best[node.id] = 1
+            else:
+                p = max(preds, key=lambda q: best[q.id])
+                best[node.id] = best[p.id] + 1
+                parent[node.id] = p.id
+        leaves = self.leaves()
+        pool = leaves if leaves else self.nodes
+        end = max(pool, key=lambda n: best[n.id])
+        path: list[AgentNode] = []
+        cur: str | None = end.id
+        while cur is not None:
+            n = self.node_by_id(cur)
+            if n is not None:
+                path.append(n)
+            cur = parent[cur]
+        path.reverse()
+        return path
+
+    def depth(self) -> int:
+        """Node count on the longest root→leaf path (0 if empty).
+
+        Public alias of the recurrence used by `_depth`, kept for callers
+        that want the count without reconstructing the whole path.
+        """
+        return self._depth()
+
     def content_hash(self) -> str:
         """Stable hash of the canonical topology. Used for dedup.
 

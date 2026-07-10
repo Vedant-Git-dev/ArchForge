@@ -21,9 +21,10 @@ from dotenv import load_dotenv
 
 from .architect.designer import Architect
 from .config import data_dir as _config_data_dir
-from .core.experience import Experience, StructuralScores
+from .core.experience import Experience
 from .core.task import Task
 from .evaluator.output import OutputEvaluator
+from .evaluator.structural import StructuralEvaluator
 from .executor.embeddings import get_default_embedding_client
 from .executor.engine import Engine
 from .executor.llm import get_default_llm_client
@@ -142,7 +143,10 @@ def run_cmd(
         pipeline=decision.pipeline,
     )
     exp.output = output
-    exp.structural = StructuralScores()  # Phase 2
+    # Structural metrics are a pure-topology calculation (no execution
+    # data, no LLM). Phase 2 fills the field Phase 1 left zeroed; the
+    # composite formula is unchanged (weights stay fixed until Phase 6).
+    exp.structural = StructuralEvaluator().evaluate(decision.pipeline)
     exp.wall_time_seconds = result.wall_time_seconds
     exp.token_estimate = result.total_tokens
     exp.final_output = result.final_output
@@ -169,6 +173,9 @@ def run_cmd(
         "speed": round(output.speed_normalized, 3),
         "cost": round(output.cost_normalized, 3),
         "composite": round(exp.composite_score, 3),
+        "structural": round(exp.structural.score, 3),
+        "critical_path": exp.structural.critical_path_length,
+        "parallelism": round(exp.structural.parallelism_ratio, 3),
         "wall_time_seconds": round(result.wall_time_seconds, 3),
         "tokens": result.total_tokens,
         "trigger": decision.triggered_from,
