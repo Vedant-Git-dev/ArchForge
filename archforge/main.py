@@ -240,7 +240,9 @@ def run_cmd(
         "parallelism": round(exp.structural.parallelism_ratio, 3),
         "diagnoses": [
             {"axis": d.axis, "severity": round(d.severity, 2),
-             "root": d.structural_root, "reason": d.reason}
+             "root": d.structural_root,
+             "nodes": d.target_nodes,
+             "reason": d.reason}
             for d in exp.diagnoses
         ],
         "wall_time_seconds": round(result.wall_time_seconds, 3),
@@ -270,10 +272,16 @@ def inspect_cmd(data_dir: str | None, last_n: int) -> None:
     recent = sorted(all_exps, key=lambda e: e.timestamp, reverse=True)[:last_n]
     click.echo(f"Total experiences: {len(all_exps)}")
     for e in recent:
-        roots = ", ".join(d.structural_root for d in e.diagnoses) or "none"
+        parts = []
+        for d in e.diagnoses:
+            tag = d.structural_root
+            if d.target_nodes:
+                tag = f"{tag}@{','.join(d.target_nodes)}"
+            parts.append(tag)
+        dx = ", ".join(parts) or "none"
         click.echo(
             f"  - {e.id} [{e.task.type}] composite={e.composite_score:.2f} "
-            f"structural={e.structural.score:.2f} dx=[{roots}] "
+            f"structural={e.structural.score:.2f} dx=[{dx}] "
             f"task={e.task.description[:60]!r}"
         )
 

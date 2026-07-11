@@ -22,12 +22,21 @@ class Diagnosis:
 
     Phase 1 keeps the schema in place but stores empty lists; nothing depends
     on it being populated yet.
+
+    `target_nodes` (Phase 2) pins the diagnosis to specific pipeline node ids,
+    so a diagnosis like "the classifier and fact_checker don't earn their
+    place for this summary" carries the *which* as structured data — the
+    intervention library matches on `structural_root` and applies to
+    `target_nodes`, rather than parsing the reason prose. Defaults to empty
+    for diagnoses that aren't about particular nodes (speed/cost/structure
+    at the pipeline level). Clamped to real node ids by the Diagnostician.
     """
 
     axis: str  # "accuracy" | "speed" | "cost" | "structure"
     severity: float  # 0-1
     reason: str
-    structural_root: str = ""  # categorial: "no_validator", "serial_bottleneck", ...
+    structural_root: str = ""  # categorical: "no_validator", "serial_bottleneck", ...
+    target_nodes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -35,6 +44,7 @@ class Diagnosis:
             "severity": self.severity,
             "reason": self.reason,
             "structural_root": self.structural_root,
+            "target_nodes": list(self.target_nodes),
         }
 
     @classmethod
@@ -44,6 +54,7 @@ class Diagnosis:
             severity=data["severity"],
             reason=data["reason"],
             structural_root=data.get("structural_root", ""),
+            target_nodes=data.get("target_nodes", []),
         )
 
 

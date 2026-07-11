@@ -37,12 +37,16 @@ from ..core.experience import Diagnosis, OutputScores, StructuralScores
 from ..core.pipeline import PipelineDAG
 
 # Axes the diagnostician is allowed to speak to.
-_AXES = ("accuracy", "speed", "cost", "structure")
+_AXES = ("accuracy", "speed", "cost", "structure", "all")
 
 # Structural facts that are true regardless of the LLM's reading, and so are
 # ALWAYS merged into the final list when present (never omitted, never spoken
 # away by an LLM that says "nothing structural is wrong").
 _DETERMINISTIC_ROOTS = {"unused_outputs", "redundant_agents"}
+
+# Roots that target specific pipeline nodes and therefore SHOULD carry
+# non-empty target_nodes when the LLM emits them.
+_AGENT_TARGETED_ROOTS = {"unnecessary_agents", "redundant_agents", "unused_outputs"}
 
 
 def _clamp_severity(v: Any) -> float:
@@ -51,6 +55,24 @@ def _clamp_severity(v: Any) -> float:
     except (TypeError, ValueError):
         return 0.5
     return max(0.0, min(1.0, f))
+
+
+def _clamp_target_nodes(raw: Any, pipeline: PipelineDAG) -> list[str]:
+    """Keep only node ids that actually exist in this pipeline, dedup, sorted.
+
+    The LLM may hallucinate or mispell node ids; the intervention library
+    will apply to these ids, so they must be real. This is the same
+    reliability principle as clamping structural_root to the vocabulary —
+    carry the *which* as structured data, clamped to ground truth.
+    """
+    valid = {n.id for n in pipeline.nodes}
+    out: list[str] = []
+    if not isinstance(raw, list):
+        return out
+    for x in raw:
+        if isinstance(x, str) and x in valid and x not in out:
+            out.append(x)
+    return out
 
 
 def _sanitize_root(root: Any) -> str:
@@ -127,20 +149,27 @@ class Diagnostician:
                     severity=_clamp_severity(d.get("severity")),
                     reason=reason,
                     structural_root=_sanitize_root(d.get("structural_root")),
+                    target_nodes=_clamp_target_nodes(d.get("target_nodes"), pipeline),
                 )
             )
 
         if not parsed:
-            # The LLM considered and found nothing diagnosable — but the
-            # deterministic structural facts stand regardless; keep them.
-            return [d for d in floor if d.structural_root in _DETERMINISTIC_ROOTS]
+            # The LLM found nothing poor (or said so). But a measured metric
+            # may still be objectively poor — the floor fires only on tripped
+            # floors, so returning the full floor here cannot manufacture
+            # false positives. This is the fix for the silence-on-cost=0 bug:
+            # if the model stays quiet but cost=0.0 + a chunker is present,
+            # over_chunking is emitted here rather than dropped.
+            return floor
 
-        # Augment: append any deterministic structural-fact diagnoses the LLM
-        # omitted. These are topology facts, so they override omission.
+        # Augment: append any floor diagnosis whose root the LLM didn't cover.
+        # The floor fires only on objectively-tripped metrics, so a missing
+        # floor root is a real diagnosis the LLM omitted — keep it. Skip ones
+        # the LLM already emitted (matched by structural_root) to avoid dupes.
         have = {d.structural_root for d in parsed}
         out = list(parsed)
         for d in floor:
-            if d.structural_root in _DETERMINISTIC_ROOTS and d.structural_root not in have:
+            if d.structural_root not in have:
                 out.append(d)
         return out
 
@@ -163,8 +192,7 @@ class Diagnostician:
         """
         diag: list[Diagnosis] = []
         has_validator = any(roles.get(n.agent_type) == "validate" for n in pipeline.nodes)
-        has_chunker = any(n.agent_type == "chunker" for n in pipeline.nodes)
-
+       
         if output.accuracy < DIAGNOSIS_ACCURACY_LOW and not has_validator:
             sev = (DIAGNOSIS_ACCURACY_LOW - output.accuracy) / DIAGNOSIS_ACCURACY_LOW
             diag.append(
@@ -193,17 +221,6 @@ class Diagnostician:
                 )
             )
 
-        if output.cost_normalized < DIAGNOSIS_COST_LOW and has_chunker:
-            sev = (DIAGNOSIS_COST_LOW - output.cost_normalized) / DIAGNOSIS_COST_LOW
-            diag.append(
-                Diagnosis(
-                    axis="cost",
-                    severity=_clamp_severity(sev),
-                    reason="cost is high and a chunker is present — over-segmentation is plausible",
-                    structural_root="over_chunking",
-                )
-            )
-
         if structural.unused_outputs:
             diag.append(
                 Diagnosis(
@@ -212,6 +229,7 @@ class Diagnostician:
                     reason=f"{len(structural.unused_outputs)} leaf node(s) produce output nobody reads: "
                     f"{structural.unused_outputs}",
                     structural_root="unused_outputs",
+                    target_nodes=list(structural.unused_outputs),
                 )
             )
 
@@ -223,6 +241,7 @@ class Diagnostician:
                     reason=f"{len(structural.redundant_agents)} structurally-duplicate agent node(s): "
                     f"{structural.redundant_agents}",
                     structural_root="redundant_agents",
+                    target_nodes=list(structural.redundant_agents),
                 )
             )
 

@@ -18,6 +18,9 @@ from typing import Any
 from ..config import (
     COST_BUDGET_TOKENS,
     COST_PENALTY_FLOOR,
+    DIAGNOSIS_ACCURACY_LOW,
+    DIAGNOSIS_COST_LOW,
+    DIAGNOSIS_SPEED_LOW,
     SPEED_SLA_SECONDS,
     SPEED_PENALTY_FLOOR,
     STRUCTURAL_ROOTS,
@@ -51,39 +54,60 @@ redundancy) — only the OUTPUT the user would see.
 COMBINED_JUDGE_PROMPT = """\
 You are the judge AND diagnostician of one multi-agent pipeline run.
 
-Step 1 — score the OUTPUT (as the judge): return "accuracy" and \
-"completeness" floats in [0,1], and a short "rationale".
+Step 1 — score the OUTPUT: return "accuracy" and "completeness" floats in \
+[0,1], and a short "rationale".
 
-Step 2 — diagnose the CAUSE of each POOR metric. Reason ONLY from the data \
-you are given (task, final output, every output + structural metric, the \
-pipeline topology with each node's agent_type + role, and per-node traces). \
-Do not invent metrics, nodes, or verdicts that aren't in the data.
+Step 2 — diagnose. The data PRE-MARKS which metrics are POOR (below their \
+floor) under "poor_signals". You MUST emit a diagnosis for every pre-marked \
+poor metric, AND for any other poor metric or structural defect you detect. \
+Reason ONLY from the supplied data (task, input_word_count, final output, \
+the normalized metrics with their floors, the pipeline topology with each \
+node's agent_type + role and per-node traces). Do not invent metrics, nodes, \
+or verdicts.
+
+A metric is poor when its normalized value is below its floor. A structural \
+defect is poor when the topology has unused output nodes, redundant agents, \
+a too-long chain, or agents that don't contribute to THIS task.
+
+Emit MULTIPLE diagnoses when more than one thing is poor — do not collapse \
+them into one. You may emit several diagnoses on the same or different axes.
 
 Return JSON with:
 - "accuracy": float in [0,1] — does the output satisfy the task?
 - "completeness": float in [0,1] — are there obvious gaps?
 - "rationale": 1-3 sentences on the score.
-- "diagnoses": array, one entry per POOR metric with a structural/procedural
-  cause. Send [] if nothing poor. Each entry:
-  - "axis": one of "accuracy", "speed", "cost", "structure", "all" (the last is for multi-axis root causes)
+- "diagnoses": array, one entry per poor cause. [] only if genuinely nothing
+  is poor. Each entry:
+  - "axis": one of "accuracy", "speed", "cost", "structure", "all"
+    ("all" is for root causes that span multiple axes)
   - "severity": float in [0,1] (1.0 = severe)
   - "structural_root": EXACTLY one of {roots}, or "unknown:<short>" if none fit
     (novel roots are kept for future learning, not matched to a fix today)
   - "reason": 1-2 sentences naming the concrete cause from the data
-  - diagnoses must be given if the metric is poor
-  - you can give multiple diagnoses for the same or different axis if there are multiple causes
+  - "target_nodes": list of the pipeline node_ids this diagnosis is about,
+    copied from the supplied topology. REQUIRED and non-empty for roots that
+    target specific agents (unnecessary_agents, redundant_agents, \
+unused_outputs); empty list for pipeline-wide roots
+    (serial_bottleneck, deep_chain, no_critique_loop, no_validator).
 
 Allowed roots and what they mean:
-- "no_validator": no validate-role node in the pipeline
-- "serial_bottleneck": long serial critical path + low parallelism
-- "over_chunking": chunker over-segments relative to input size
-- "redundant_agents": duplicate agents doing the same work
+- "no_validator": no validate-role node is present (accuracy at risk)
+- "serial_bottleneck": long serial critical path + low parallelism → slow
+- "redundant_agents": two+ agents duplicate each other's work
 - "unused_outputs": a node whose output no downstream node reads
-- "no_critique_loop": a generate step with no critique→revision cycle after it
-- "unnecessary_agents": agent nodes that do not contribute to the final output or are not needed for the task
+- "no_critique_loop": a generate step with no critique→revision cycle
+- "unnecessary_agents": agent nodes that do not earn their place for THIS
+  task — either they don't contribute to the final output, or the step is
+  overkill given the task and the input size. 
+  Decide necessity per agent from the task, input_word_count, and
+  each node's trace — do NOT catenate module names. Give the offending
+  node_ids in target_nodes.
 - "deep_chain": an unusually long, fragile dependency chain
 
-Diagnose only metrics that are ACTUALLY poor — never invent problems. 
+If cost is poor because the pipeline did too much work for a small input,
+that is "unnecessary_agents" (the steps that were overkill), NOT a separate
+root. Diagnose only metrics that are ACTUALLY poor — never invent problems.
+Return only the JSON object.
 """
 
 
@@ -120,40 +144,60 @@ def _build_judge_payload(
     result: PipelineResult,
     structural: StructuralScores | None,
     roles: dict[str, str],
+    *,
+    speed: float | None = None,
+    cost: float | None = None,
 ) -> dict[str, Any]:
     """Grounding for the combined judge — every fact the LLM should reason over.
 
-    The pure-score path (`evaluate`) builds a smaller payload; this adds the
-    structural metrics, the topology (agent_type + role per node), and the
-    per-node traces, so the LLM can name concrete causes ("the fact_checker
-    node produced 3 unverified claims", "4 sequential analyzers on the path").
+    Pre-computes the speed/cost normalizations (deterministic, no LLM) and
+    hands the LLM the *normalized* values plus their diagnosis floors and a
+    pre-marked ``poor_signals`` map. The cost=0.0 / tokens=14287 case stays
+    silent only if the model can't see the floor — so we show it the floor.
+    Accuracy is determined by the model's own Step 1, so we pass its floor
+    only and let it self-check.
     """
     payload: dict[str, Any] = {
         "task_description": task.description,
         "task_type": task.type,
         "output": result.final_output,
-        "context": {
-            "wall_time_seconds": round(result.wall_time_seconds, 3),
-            "tokens_used": result.total_tokens,
-        },
+    }
+    # structural surface + per-node traces always travel together
+    topology = [
+        {
+            "node_id": t.node_id,
+            "agent_type": t.agent_type,
+            "role": roles.get(t.agent_type, "unknown"),
+            "duration_seconds": round(t.duration_seconds, 3),
+            "tokens": t.total_tokens,
+        }
+        for t in result.traces
+    ]
+    payload["topology"] = topology
+    payload["raw_signals"] = {
+        "wall_time_seconds": round(result.wall_time_seconds, 3),
+        "total_tokens": result.total_tokens,
     }
     if structural is not None:
-        topology = [
-            {
-                "node_id": t.node_id,
-                "agent_type": t.agent_type,
-                "role": roles.get(t.agent_type, "unknown"),
-                "duration_seconds": round(t.duration_seconds, 3),
-                "tokens": t.total_tokens,
-            }
-            for t in result.traces
-        ]
+        # Pre-mark which metrics are poor so the model cannot stay silent on
+        # a tripped floor (the silent-on-cost=0 bug). Accuracy is judged by
+        # the model in Step 1; we expose its floor for self-check.
+        poor = {
+            "speed": bool(speed is not None and speed < DIAGNOSIS_SPEED_LOW),
+            "cost": bool(cost is not None and cost < DIAGNOSIS_COST_LOW),
+            "accuracy_self_check": "diagnose if the accuracy you return in Step 1 is below "
+            f"{DIAGNOSIS_ACCURACY_LOW}",
+        }
+        if structural.unused_outputs:
+            poor["structural_unused_outputs"] = True
+        if structural.redundant_agents:
+            poor["structural_redundant_agents"] = True
         payload["metrics"] = {
-            # output surface (filled by the score half of this same call)
-            "accuracy_so_far_note": "see your own Step 1",
-            "speed_normalized_signal": {"wall_time_seconds": round(result.wall_time_seconds, 3)},
-            "cost_signal": {"total_tokens": result.total_tokens},
-            # structural surface
+            "speed_normalized": None if speed is None else round(speed, 3),
+            "speed_floor": DIAGNOSIS_SPEED_LOW,
+            "cost_normalized": None if cost is None else round(cost, 3),
+            "cost_floor": DIAGNOSIS_COST_LOW,
+            "accuracy_floor": DIAGNOSIS_ACCURACY_LOW,
             "pipeline_length": structural.pipeline_length,
             "critical_path_length": structural.critical_path_length,
             "parallelism_ratio": structural.parallelism_ratio,
@@ -162,7 +206,7 @@ def _build_judge_payload(
             "unused_output_nodes": structural.unused_outputs,
             "redundant_agent_nodes": structural.redundant_agents,
         }
-        payload["topology"] = topology
+        payload["poor_signals"] = poor
     return payload
 
 
@@ -291,14 +335,8 @@ class OutputEvaluator:
         list (clamp roots, drop malformed, fall back to the deterministic floor,
         augment deterministic structural facts) is the Diagnostician's job.
         """
-        accuracy, completeness, _rationale, raw = self._judge_with_diagnosis(
+        accuracy, completeness, _rationale, raw, speed, cost = self._judge_with_diagnosis(
             task, result, structural, roles
-        )
-        speed = _normalize(
-            result.wall_time_seconds, SPEED_SLA_SECONDS, SPEED_PENALTY_FLOOR, lower_is_better=True
-        )
-        cost = _normalize(
-            result.total_tokens, COST_BUDGET_TOKENS, COST_PENALTY_FLOOR, lower_is_better=True
         )
         log.info(
             "evaluate_with_diagnosis: judge accuracy=%.3f completeness=%.3f | "
@@ -323,8 +361,20 @@ class OutputEvaluator:
         result: PipelineResult,
         structural: StructuralScores,
         roles: dict[str, str],
-    ) -> tuple[float, float, str, list[dict[str, Any]] | None]:
-        payload = _build_judge_payload(task, result, structural, roles)
+    ) -> tuple[float, float, str, list[dict[str, Any]] | None, float, float]:
+        # Speed/cost are deterministic normalizations — compute them BEFORE
+        # the judge call so we can ground the diagnosis with the normalized
+        # values + their floors (otherwise the model sees only raw token
+        # counts and can't tell cost=0.0 is poor, which is the silence bug).
+        speed = _normalize(
+            result.wall_time_seconds, SPEED_SLA_SECONDS, SPEED_PENALTY_FLOOR, lower_is_better=True
+        )
+        cost = _normalize(
+            result.total_tokens, COST_BUDGET_TOKENS, COST_PENALTY_FLOOR, lower_is_better=True
+        )
+        payload = _build_judge_payload(
+            task, result, structural, roles, speed=speed, cost=cost
+        )
         response = self.llm.chat(
             system=COMBINED_JUDGE_PROMPT.format(roots=", ".join(STRUCTURAL_ROOTS)),
             user=json.dumps(payload, ensure_ascii=False),
@@ -335,14 +385,14 @@ class OutputEvaluator:
         data = _parse_json_dict(response.text)
         if data is None:
             log.warning("_judge_with_diagnosis: parse failure; returning neutral scores + no raw diagnoses")
-            return 0.5, 0.5, "judge parse failed", None
+            return 0.5, 0.5, "judge parse failed", None, speed, cost
         acc = float(data.get("accuracy", 0.0))
         comp = float(data.get("completeness", 0.0))
         rationale = str(data.get("rationale", ""))
         raw = data.get("diagnoses")
         if not isinstance(raw, list):
             raw = None
-        return acc, comp, rationale, raw
+        return acc, comp, rationale, raw, speed, cost
 
 
 __all__ = ["OutputEvaluator", "SPEED_SLA_SECONDS", "COST_BUDGET_TOKENS"]

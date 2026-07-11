@@ -133,11 +133,18 @@ DIAGNOSIS_DEEP_CHAIN_MIN = 7   # dependency_depth at/above this is a fragile dee
 STRUCTURAL_ROOTS: tuple[str, ...] = (
     "no_validator",        # no validation/verify step present
     "serial_bottleneck",  # long serial critical path, low parallelism
-    "over_chunking",      # chunker over-segments relative to input
-    "redundant_agents",   # duplicate agents doing the same work
+    "redundant_agents",   # two+ agents duplicate each other's work
     "unused_outputs",     # dead leaves — agents whose output no one reads
     "no_critique_loop",   # generate step with no critique→revision cycle
     "deep_chain",         # fragile long dependency chain
+    "unnecessary_agents", # one or more agents don't earn their place for THIS
+                          # task: either they don't contribute to the final
+                          # output, or the step is overkill given the input
+                          # size (e.g. chunking a short input; a classifier +
+                          # fact_checker on a plain summary). The judge decides
+                          # from the task, the input_word_count, and the
+                          # per-node traces — NOT by catenating module names.
+                          # The targeted node_ids go in target_nodes.
 )
 
 
