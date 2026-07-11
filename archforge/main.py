@@ -23,8 +23,10 @@ from .architect.designer import Architect
 from .config import data_dir as _config_data_dir
 from .core.experience import Experience
 from .core.task import Task
+from .evaluator.diagnosis import Diagnostician
 from .evaluator.output import OutputEvaluator
 from .evaluator.structural import StructuralEvaluator
+from .executor.agents.registry import default_pool
 from .executor.embeddings import get_default_embedding_client
 from .executor.engine import Engine
 from .executor.llm import get_default_llm_client
@@ -161,28 +163,43 @@ def run_cmd(
                 err=True,
             )
 
-    # 6. Evaluate.
+    # 6. Compute structural metrics (pure topology, no LLM) BEFORE judging,
+    # so the diagnosis can be folded into the single score-judge call below.
     click.echo("→ Evaluating...", err=True)
+    log.info("step 6/8: computing structural metrics + judging in ONE LLM call")
+    structural = StructuralEvaluator().evaluate(decision.pipeline)
+    roles = {name: p.role for name, p in default_pool().primitives().items()}
+
+    # 7. ONE judge call returns scores AND raw diagnoses (merged — the
+    # diagnosis adds zero LLM calls vs Phase 1). The Diagnostician then
+    # sanitizes the raw list (clamp roots, fallback to rules on parse
+    # failure, augment deterministic structural facts).
     evaluator = OutputEvaluator(llm=llm)
-    log.info("step 6/8: evaluating output quality")
-    output = evaluator.evaluate(task, result)
+    output, raw_diagnoses = evaluator.evaluate_with_diagnosis(
+        task, result, structural=structural, roles=roles,
+    )
     log.info(
         "step 6/8: scores accuracy=%.3f completeness=%.3f speed=%.3f cost=%.3f",
         output.accuracy, output.completeness, output.speed_normalized, output.cost_normalized,
     )
 
-    # 7. Compute composite + persist.
-    log.info("step 7/8: computing structural metrics + composite score")
     exp = Experience(
         id=_new_exp_id(),
         task=task,
         pipeline=decision.pipeline,
     )
     exp.output = output
-    # Structural metrics are a pure-topology calculation (no execution
-    # data, no LLM). Phase 2 fills the field Phase 1 left zeroed; the
-    # composite formula is unchanged (weights stay fixed until Phase 6).
-    exp.structural = StructuralEvaluator().evaluate(decision.pipeline)
+    exp.structural = structural
+    diagnostician = Diagnostician()
+    exp.diagnoses = diagnostician.evaluate(
+        output, exp.structural, decision.pipeline,
+        roles=roles, raw_diagnoses=raw_diagnoses,
+    )
+    log.info(
+        "step 7/8: diagnoses=%d roots=%s",
+        len(exp.diagnoses),
+        [d.structural_root for d in exp.diagnoses],
+    )
     exp.wall_time_seconds = result.wall_time_seconds
     exp.token_estimate = result.total_tokens
     exp.final_output = result.final_output
@@ -221,6 +238,11 @@ def run_cmd(
         "structural": round(exp.structural.score, 3),
         "critical_path": exp.structural.critical_path_length,
         "parallelism": round(exp.structural.parallelism_ratio, 3),
+        "diagnoses": [
+            {"axis": d.axis, "severity": round(d.severity, 2),
+             "root": d.structural_root, "reason": d.reason}
+            for d in exp.diagnoses
+        ],
         "wall_time_seconds": round(result.wall_time_seconds, 3),
         "tokens": result.total_tokens,
         "trigger": decision.triggered_from,
@@ -248,9 +270,11 @@ def inspect_cmd(data_dir: str | None, last_n: int) -> None:
     recent = sorted(all_exps, key=lambda e: e.timestamp, reverse=True)[:last_n]
     click.echo(f"Total experiences: {len(all_exps)}")
     for e in recent:
+        roots = ", ".join(d.structural_root for d in e.diagnoses) or "none"
         click.echo(
             f"  - {e.id} [{e.task.type}] composite={e.composite_score:.2f} "
-            f"task={e.task.description[:80]!r}"
+            f"structural={e.structural.score:.2f} dx=[{roots}] "
+            f"task={e.task.description[:60]!r}"
         )
 
 

@@ -49,12 +49,12 @@ GROQ_API_KEY_ENV = "GROQ_API_KEY"
 DEFAULT_LLM_ROUTES: dict[str, str] = {
     "reader": "llama-3.1-8b-instant",
     "chunker": "llama-3.1-8b-instant",
-    "classifier": "llama-3.3-70b-versatile",
-    "summarizer": "llama-3.3-70b-versatile",
-    "fact_checker": "llama-3.3-70b-versatile",
+    "classifier": "qwen/qwen3-32b",
+    "summarizer": "qwen/qwen3-32b",
+    "fact_checker": "openai/gpt-oss-120b",
     "writer": "llama-3.3-70b-versatile",
-    "judge": "llama-3.3-70b-versatile",
-    "default": "llama-3.3-70b-versatile",
+    "judge": "openai/gpt-oss-120b",
+    "default": "openai/gpt-oss-120b",
 }
 
 
@@ -112,6 +112,35 @@ STRUCTURAL_UNUSED_PENALTY = 0.10   # per dead-output leaf (output no one reads)
 STRUCTURAL_REDUNDANT_PENALTY = 0.15  # per structurally-duplicate agent
 
 
+# ─── Diagnosis (Phase 2 — Surface 3) ─────────────────────────────────────────
+
+# A diagnosis is emitted only when a metric trips its "low" floor. Severity
+# scales with how far below the floor the value sits (see Diagnostician).
+# These are the rule-based trip points for the structural-root categoriser —
+# the keys the intervention library (next deliverable) matches a fix against.
+DIAGNOSIS_ACCURACY_LOW = 0.6    # accuracy below this is "inaccurate"
+DIAGNOSIS_SPEED_LOW = 0.4       # speed_normalized below this is "slow"
+DIAGNOSIS_COST_LOW = 0.4        # cost_normalized below this is "expensive"
+DIAGNOSIS_PARALLELISM_LOW = 0.05  # parallelism_ratio below this is "serial"
+DIAGNOSIS_BOTTLENECK_MIN_PATH = 3  # critical_path (edges) at/above this is a bottleneck
+DIAGNOSIS_DEEP_CHAIN_MIN = 7   # dependency_depth at/above this is a fragile deep chain
+
+# The controlled vocabulary of structural_root categories. The LLM
+# diagnostician is constrained to these (plus the "unknown:<brief>" escape
+# for novel roots), and the intervention library — next Phase 2 deliverable —
+# matches a fix by this key. Seeded from plan.md's intervention table; the
+# plan notes the set is "not limited to these", hence the unknown escape.
+STRUCTURAL_ROOTS: tuple[str, ...] = (
+    "no_validator",        # no validation/verify step present
+    "serial_bottleneck",  # long serial critical path, low parallelism
+    "over_chunking",      # chunker over-segments relative to input
+    "redundant_agents",   # duplicate agents doing the same work
+    "unused_outputs",     # dead leaves — agents whose output no one reads
+    "no_critique_loop",   # generate step with no critique→revision cycle
+    "deep_chain",         # fragile long dependency chain
+)
+
+
 __all__ = [
     "DATA_DIR_ENV",
     "DEFAULT_DATA_DIR",
@@ -129,4 +158,11 @@ __all__ = [
     "COST_PENALTY_FLOOR",
     "STRUCTURAL_UNUSED_PENALTY",
     "STRUCTURAL_REDUNDANT_PENALTY",
+    "DIAGNOSIS_ACCURACY_LOW",
+    "DIAGNOSIS_SPEED_LOW",
+    "DIAGNOSIS_COST_LOW",
+    "DIAGNOSIS_PARALLELISM_LOW",
+    "DIAGNOSIS_BOTTLENECK_MIN_PATH",
+    "DIAGNOSIS_DEEP_CHAIN_MIN",
+    "STRUCTURAL_ROOTS",
 ]
