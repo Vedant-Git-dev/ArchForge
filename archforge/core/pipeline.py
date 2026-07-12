@@ -12,6 +12,18 @@ def new_pipeline_id() -> str:
     return f"pipe-{uuid.uuid4().hex[:12]}"
 
 
+def new_node_id() -> str:
+    """A unique pipeline-local node id.
+
+    `PipelineDAG.linear` uses deterministic ``n0..n{n-1}`` ids so its edges
+    can reference nodes before they exist; mutations build on an arbitrary
+    existing DAG and append nodes, so they generate a fresh uuid-derived id
+    that never collides with the linear ids or with any prior mutation's ids.
+    Tests look nodes up by agent_type / topology, never by exact generated id.
+    """
+    return f"n{uuid.uuid4().hex[:8]}"
+
+
 @dataclass
 class AgentNode:
     """One agent in a pipeline. References a Primitive by `agent_type`."""
@@ -242,6 +254,217 @@ class PipelineDAG:
         that want the count without reconstructing the whole path.
         """
         return self._depth()
+
+    # ----- structural mutation (Phase 2) --------------------------------------
+    #
+    # The fixed vocabulary of plan.md's intervened mutations — insert, delete,
+    # parallelize, swap (replace), merge — as pure functions on the DAG. Each
+    # returns a NEW PipelineDAG (the originals are never mutated), recomputes
+    # the fingerprint, and uses fresh unique ids so the result is cycle-free
+    # and addressable. These are the operations the Intervention Library
+    # (Phase 2.2) names declaratively and the Architect (Phase 2.3) dispatches;
+    # keeping them here — DAG-level and agent-agnostic — is what lets an
+    # intervention be a *description of an edit* rather than imperative code.
+    #
+    # Scope note: only the structural edit ships here. The *semantic* side of
+    # two seeds is deliberately coarse and lands later: replace_node swaps an
+    # agent_type but not a "larger-chunk chunker variant" (no separate variant
+    # exists in the registry yet) — the variant swap is Phase 6 config work;
+    # merge_chain collapses a chain to the first node's agent_type, not to a
+    # fused-prompt primitive (that is Phase 5's Primitive Discoverer).
+
+    def _clone_with(self, nodes: list[AgentNode], edges: list[Edge]) -> "PipelineDAG":
+        dag = PipelineDAG(id=new_pipeline_id(), nodes=nodes, edges=edges)
+        dag.fingerprint = dag.compute_fingerprint()
+        return dag
+
+    def insert_after(self, node_id: str, agent_type: str, *, level: int = 0) -> "PipelineDAG":
+        """Splice a new node between `node_id` and ALL of its successors.
+
+        X→S becomes X→M→S for every successor S of X. If X was a leaf (no
+        successors) M becomes the new leaf. This is the primitive behind the
+        ``no_validator`` / ``no_critique_loop`` seeds and the bottom half of
+        the serial-bottleneck parallelize (an aggregator would be inserted
+        after the fan-out).
+        """
+        if self.node_by_id(node_id) is None:
+            raise KeyError(f"insert_after: unknown node id {node_id!r}")
+        new = new_node_id()
+        succs = self.successors(node_id)
+        succ_ids = {s.id for s in succs}
+        # Copy node objects (from_dict) so the caller's pipeline is untouched —
+        # every mutation is functional: it returns a new DAG.
+        nodes = [AgentNode.from_dict(n.to_dict()) for n in self.nodes]
+        nodes.append(AgentNode(id=new, agent_type=agent_type, level=level))
+        edges: list[Edge] = [
+            Edge.from_dict(e.to_dict())
+            for e in self.edges
+            if not (e.source == node_id and e.target in succ_ids)
+        ]
+        edges.append(Edge(source=node_id, target=new, data_type="any"))
+        for s in succs:
+            edges.append(Edge(source=new, target=s.id, data_type="any"))
+        return self._clone_with(nodes, edges)
+
+    def insert_before(self, node_id: str, agent_type: str, *, level: int = 0) -> "PipelineDAG":
+        """Splice a new node between ALL predecessors of `node_id` and itself.
+
+        P→X becomes P→M→X for every predecessor P of X. If X was a root (no
+        predecessors) M becomes the new root. Dual of `insert_after`; lets an
+        intervention phrase e.g. "validate before generate" symmetrically.
+        """
+        if self.node_by_id(node_id) is None:
+            raise KeyError(f"insert_before: unknown node id {node_id!r}")
+        new = new_node_id()
+        preds = self.predecessors(node_id)
+        pred_ids = {p.id for p in preds}
+        nodes = [AgentNode.from_dict(n.to_dict()) for n in self.nodes]
+        nodes.append(AgentNode(id=new, agent_type=agent_type, level=level))
+        edges: list[Edge] = [
+            Edge.from_dict(e.to_dict())
+            for e in self.edges
+            if not (e.target == node_id and e.source in pred_ids)
+        ]
+        edges.append(Edge(source=new, target=node_id, data_type="any"))
+        for p in preds:
+            edges.append(Edge(source=p.id, target=new, data_type="any"))
+        return self._clone_with(nodes, edges)
+
+    def delete_node(self, node_id: str) -> "PipelineDAG":
+        """Remove a node and bypass it: each predecessor is connected to each
+        successor (the all-to-all bypass — the DAG-correct generalization of
+        "cut out the middle of a chain" when a node has >1 pred or >1 succ).
+
+        Deleting a leaf drops its incoming edges (succs empty → no bypass).
+        Deleting a root drops its outgoing edges (preds empty → no bypass).
+        Self-loop bypasses (pred==succ) are skipped; duplicate edges are
+        deduped. Backs the ``redundant_agents`` / ``unused_outputs`` /
+        ``unnecessary_agents`` seeds.
+        """
+        if self.node_by_id(node_id) is None:
+            raise KeyError(f"delete_node: unknown node id {node_id!r}")
+        pred_ids = [p.id for p in self.predecessors(node_id)]
+        succ_ids = [s.id for s in self.successors(node_id)]
+        nodes = [AgentNode.from_dict(n.to_dict()) for n in self.nodes if n.id != node_id]
+        edges: list[Edge] = [
+            Edge.from_dict(e.to_dict())
+            for e in self.edges
+            if e.source != node_id and e.target != node_id
+        ]
+        existing = {(e.source, e.target) for e in edges}
+        for p in pred_ids:
+            for s in succ_ids:
+                if p != s and (p, s) not in existing:
+                    existing.add((p, s))
+                    edges.append(Edge(source=p, target=s, data_type="any"))
+        return self._clone_with(nodes, edges)
+
+    def replace_node(self, node_id: str, agent_type: str, *, level: int | None = None) -> "PipelineDAG":
+        """Swap a node's agent_type in place, preserving its id and all edges.
+
+        The structural swap primitive — backs any "swap agent X for a variant"
+        intervention. A same-type replace is a structural no-op (and
+        content_hash is identical, correctly). Distinct agent variants keyed
+        by config, not agent_type, land with Phase 6.
+        """
+        if self.node_by_id(node_id) is None:
+            raise KeyError(f"replace_node: unknown node id {node_id!r}")
+        nodes: list[AgentNode] = []
+        for n in self.nodes:
+            if n.id == node_id:
+                nodes.append(AgentNode(
+                    id=n.id, agent_type=agent_type,
+                    level=n.level if level is None else level, config=n.config,
+                ))
+            else:
+                nodes.append(AgentNode.from_dict(n.to_dict()))
+        edges = [Edge.from_dict(e.to_dict()) for e in self.edges]
+        return self._clone_with(nodes, edges)
+
+    def parallelize(self, node_id: str, agent_type: str, *, n: int = 1, level: int = 0) -> "PipelineDAG":
+        """Fan out `n` sibling nodes of type `agent_type` alongside `node_id`.
+
+        Each new sibling inherits node_id's predecessor set and successor
+        set, so the siblings execute concurrently and the existing successor
+        acts as the implicit fan-in (the engine already merges multi-predecessor
+        inputs under a ``predecessors`` key). The dedicated vote/merge
+        aggregator primitive the plan names is a Phase-2.5 base-primitive
+        addition; this primitive supplies the structural fan-out it needs.
+        Requires node_id to have a successor to merge into — parallelize a
+        leaf and you get extra dangling leaves by construction.
+        """
+        if self.node_by_id(node_id) is None:
+            raise KeyError(f"parallelize: unknown node id {node_id!r}")
+        if n < 1:
+            raise ValueError("parallelize: n must be >= 1")
+        pred_ids = [p.id for p in self.predecessors(node_id)]
+        succ_ids = [s.id for s in self.successors(node_id)]
+        siblings = [AgentNode(id=new_node_id(), agent_type=agent_type, level=level)
+                    for _ in range(n)]
+        nodes = [AgentNode.from_dict(nd.to_dict()) for nd in self.nodes] + siblings
+        edges = [Edge.from_dict(e.to_dict()) for e in self.edges]
+        for sib in siblings:
+            for p in pred_ids:
+                edges.append(Edge(source=p, target=sib.id, data_type="any"))
+            for s in succ_ids:
+                edges.append(Edge(source=sib.id, target=s, data_type="any"))
+        return self._clone_with(nodes, edges)
+
+    def merge_chain(self, node_ids: list[str], *, merged_agent_type: str | None = None,
+                    level: int = 0) -> "PipelineDAG":
+        """Collapse a consecutive chain of nodes into a single node.
+
+        Requires `node_ids` to be a *simple chain*: each consecutive pair has
+        a forward edge, no non-consecutive edges cross the set, and only the
+        first node has external predecessors and only the last has external
+        successors. The merged node takes the first node's agent_type unless
+        `merged_agent_type` is given, and inherits the chain's external
+        edges. Backs the ``deep_chain`` seed ("flatten by merging consecutive
+        compatible agents"); the *fused-prompt* merge is Phase 5.
+        """
+        if not node_ids:
+            raise ValueError("merge_chain: node_ids must be non-empty")
+        for nid in node_ids:
+            if self.node_by_id(nid) is None:
+                raise KeyError(f"merge_chain: unknown node id {nid!r}")
+        if len(set(node_ids)) != len(node_ids):
+            raise ValueError("merge_chain: node_ids must be unique")
+
+        sset = set(node_ids)
+        consecutive = {(node_ids[i], node_ids[i + 1]) for i in range(len(node_ids) - 1)}
+        # Validate: a clean simple chain.
+        for e in self.edges:
+            if e.source in sset and e.target in sset:
+                if (e.source, e.target) not in consecutive:
+                    raise ValueError(
+                        f"merge_chain: edge {e.source}→{e.target} crosses/loops the chain; "
+                        "node_ids must be a simple consecutive chain")
+            if e.source in sset and e.target not in sset and e.source != node_ids[-1]:
+                raise ValueError(
+                    f"merge_chain: node {e.source} is not the chain end but has an external successor")
+            if e.target in sset and e.source not in sset and e.target != node_ids[0]:
+                raise ValueError(
+                    f"merge_chain: node {e.target} is not the chain start but has an external predecessor")
+        for i in range(len(node_ids) - 1):
+            if not any(e.source == node_ids[i] and e.target == node_ids[i + 1] for e in self.edges):
+                raise ValueError(
+                    f"merge_chain: no edge {node_ids[i]}→{node_ids[i + 1]}; not a consecutive chain")
+
+        first, last = node_ids[0], node_ids[-1]
+        ext_preds = [p.id for p in self.predecessors(first)]
+        ext_succs = [s.id for s in self.successors(last)]
+        merged_type = merged_agent_type if merged_agent_type is not None \
+            else self.node_by_id(first).agent_type
+        merged = AgentNode(id=new_node_id(), agent_type=merged_type, level=level)
+        nodes = [AgentNode.from_dict(nd.to_dict()) for nd in self.nodes if nd.id not in sset]
+        nodes.append(merged)
+        edges = [Edge.from_dict(e.to_dict()) for e in self.edges
+                 if e.source not in sset and e.target not in sset]
+        for p in ext_preds:
+            edges.append(Edge(source=p, target=merged.id, data_type="any"))
+        for s in ext_succs:
+            edges.append(Edge(source=merged.id, target=s, data_type="any"))
+        return self._clone_with(nodes, edges)
 
     def content_hash(self) -> str:
         """Stable hash of the canonical topology. Used for dedup.

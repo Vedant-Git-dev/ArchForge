@@ -157,9 +157,10 @@ class Diagnostician:
             # The LLM found nothing poor (or said so). But a measured metric
             # may still be objectively poor — the floor fires only on tripped
             # floors, so returning the full floor here cannot manufacture
-            # false positives. This is the fix for the silence-on-cost=0 bug:
-            # if the model stays quiet but cost=0.0 + a chunker is present,
-            # over_chunking is emitted here rather than dropped.
+            # false positives. The floor has NO cost branch: cost-overwork is
+            # the LLM's call (output.py pre-marks cost in `poor_signals` so
+            # the judge can't stay silent on cost=0.0). Any tripped floor fact
+            # the LLM missed — e.g. an unused_outputs leaf — is kept here.
             return floor
 
         # Augment: append any floor diagnosis whose root the LLM didn't cover.
