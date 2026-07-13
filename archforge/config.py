@@ -52,7 +52,7 @@ DEFAULT_LLM_ROUTES: dict[str, str] = {
     "classifier": "qwen/qwen3-32b",
     "summarizer": "qwen/qwen3-32b",
     "fact_checker": "openai/gpt-oss-120b",
-    "writer": "llama-3.3-70b-versatile",
+    "writer": "openai/gpt-oss-20b",
     "judge": "openai/gpt-oss-120b",
     "default": "openai/gpt-oss-120b",
 }
@@ -148,6 +148,54 @@ STRUCTURAL_ROOTS: tuple[str, ...] = (
 )
 
 
+# ─── Intervention Library (Phase 2 — Reasoned Mutations) ─────────────────────
+
+# The fixed set of pipeline edits the Architect can apply. Each value is the
+# same verb as a Phase 2.1 PipelineDAG mutation primitive, so an Intervention
+# is a declarative description of a primitive call the Architect dispatches.
+MUTATION_TYPES: tuple[str, ...] = (
+    "insert",       # splice a node in (→ insert_after / insert_before)
+    "delete",       # → delete_node (with the all-to-all bypass)
+    "parallelize",  # → parallelize (fan out a sibling alongside a node)
+    "swap",         # → replace_node (swap an agent_type in place)
+    "merge",        # → merge_chain (collapse a consecutive run to one node)
+)
+
+# Where in the pipeline an intervention lands. The Architect (Phase 2.3)
+# resolves a slot to concrete node ids against a live pipeline + diagnosis:
+#   before_generate    → the generate-role terminal (writer); insert BEFORE it
+#                        so the inserted node's output flows INTO the writer.
+#                        Backs no_validator — a fact_checker AFTER the writer
+#                        would validate into a void (the engine extracts the
+#                        writer's `output` regardless of position), so the
+#                        validator must precede the producer of the final
+#                        output. Matches the default pipeline's own shape:
+#                        ... → summarizer → fact_checker → writer.
+#   after_generate     → after the generate node. Backs no_critique_loop, but
+#                        NOTE a critique→revision CYCLE isn't expressible as a
+#                        simple insert in an acyclic DAG, AND the writer would
+#                        still be extracted as terminal — so the critic's output
+#                        would have to become the new terminal (an engine
+#                        convention change). Shelved until 2.5 registers
+#                        `critic` AND that convention is revisited; the seed
+#                        documents the intent.
+#   diagnosis_targets  → the diagnosis's own target_nodes (the evaluator
+#                        already pinned the offending agents). Backs
+#                        redundant_agents / unused_outputs / unnecessary_agents.
+#   deep_chain_nodes   → the consecutive chain to collapse (the critical path
+#                        or the diagnosis's target_nodes as a chain). Backs
+#                        deep_chain.
+#   bottleneck_node    → the serial node on the critical path to fan out.
+#                        Backs serial_bottleneck.
+TARGET_SLOTS: tuple[str, ...] = (
+    "before_generate",
+    "after_generate",
+    "diagnosis_targets",
+    "deep_chain_nodes",
+    "bottleneck_node",
+)
+
+
 __all__ = [
     "DATA_DIR_ENV",
     "DEFAULT_DATA_DIR",
@@ -172,4 +220,6 @@ __all__ = [
     "DIAGNOSIS_BOTTLENECK_MIN_PATH",
     "DIAGNOSIS_DEEP_CHAIN_MIN",
     "STRUCTURAL_ROOTS",
+    "MUTATION_TYPES",
+    "TARGET_SLOTS",
 ]

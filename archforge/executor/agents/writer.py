@@ -21,7 +21,7 @@ You receive a "context" describing the original task and the outputs of
 every prior primitive. Your responsibility is to integrate those into a
 single coherent response that satisfies the original task.
 
-Return JSON with:
+Return Proper JSON (with no extra text, strips) with the following fields:
 - "output": the final text the user will read. This is the response the
   pipeline returns. Make it clear, complete, and free of intermediate
   reasoning.
@@ -34,7 +34,9 @@ Return JSON with:
 
 Do not hedge the output itself — the user wants a real answer. Surface
 uncertainty by saying so plainly when it's justified, but don't fill the
-response with disclaimers.
+response with disclaimers. Answer ONLY from the evidence you were given. If the evidence is insufficient,
+acknowledge that and say what additional information would be needed to
+fully answer the task. Do not hallucinate or invent information. 
 """
 
 

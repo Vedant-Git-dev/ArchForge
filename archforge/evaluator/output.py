@@ -76,8 +76,7 @@ Return JSON with:
 - "accuracy": float in [0,1] — does the output satisfy the task?
 - "completeness": float in [0,1] — are there obvious gaps?
 - "rationale": 1-3 sentences on the score.
-- "diagnoses": array, one entry per poor cause. [] only if genuinely nothing
-  is poor. Each entry:
+- "diagnoses": array, one entry per poor cause. Each entry:
   - "axis": one of "accuracy", "speed", "cost", "structure", "all"
     ("all" is for root causes that span multiple axes)
   - "severity": float in [0,1] (1.0 = severe)
@@ -99,7 +98,7 @@ Allowed roots and what they mean:
 - "unnecessary_agents": agent nodes that do not earn their place for THIS
   task — either they don't contribute to the final output, or the step is
   overkill given the task and the input size. 
-  Decide necessity per agent from the task, input_word_count, and
+  Decide necessity per agent from the task, task type, input_word_count, and
   each node's trace — do NOT catenate module names. Give the offending
   node_ids in target_nodes.
 - "deep_chain": an unusually long, fragile dependency chain
