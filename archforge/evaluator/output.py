@@ -324,24 +324,33 @@ class OutputEvaluator:
         structural: StructuralScores,
         roles: dict[str, str],
         user_rating: float | None = None,
-    ) -> tuple[OutputScores, list[dict[str, Any]] | None]:
+    ) -> tuple[OutputScores, list[dict[str, Any]] | None, bool]:
         """Score + raw diagnoses in ONE judge call.
 
-        Returns (scores, raw_diagnoses). `raw_diagnoses` is the LLM's parsed
-        `diagnoses` list (each entry a dict with axis/severity/structural_root/
-        reason — NOT yet clamped to the vocabulary), or None if the judge gave
-        no usable diagnoses list or failed to parse at all. Sanitizing that
+        Returns ``(scores, raw_diagnoses, judge_parse_failed)``. ``raw_diagnoses``
+        is the LLM's parsed ``diagnoses`` list (each entry a dict with
+        axis/severity/structural_root/reason — NOT yet clamped to the
+        vocabulary), or None if the judge gave no usable diagnoses list or
+        failed to parse at all. ``judge_parse_failed`` is True ONLY when the
+        judge response could not be parsed at all (scores fell back to the
+        neutral 0.5/0.5 midpoint), distinct from "valid JSON, no diagnoses
+        list". The caller (main.py) uses the flag to decline persisting an
+        experience whose scores are unreliable — so a parse-failure run never
+        pollutes retrieval with garbage neutral-scored rows. (Note: a valid
+        JSON payload that simply omits a list is NOT a parse failure — the
+        scores are real; only the diagnoses are absent.) Sanitizing the raw
         list (clamp roots, drop malformed, fall back to the deterministic floor,
         augment deterministic structural facts) is the Diagnostician's job.
         """
-        accuracy, completeness, _rationale, raw, speed, cost = self._judge_with_diagnosis(
-            task, result, structural, roles
+        accuracy, completeness, _rationale, raw, speed, cost, parse_failed = (
+            self._judge_with_diagnosis(task, result, structural, roles)
         )
         log.info(
             "evaluate_with_diagnosis: judge accuracy=%.3f completeness=%.3f | "
-            "speed=%.3f cost=%.3f | raw_diagnoses=%s",
+            "speed=%.3f cost=%.3f | raw_diagnoses=%s | parse_failed=%s",
             accuracy, completeness, speed, cost,
             "n/a" if raw is None else f"{len(raw)} entries",
+            parse_failed,
         )
         return (
             OutputScores(
@@ -352,6 +361,7 @@ class OutputEvaluator:
                 user_rating=user_rating,
             ),
             raw,
+            parse_failed,
         )
 
     def _judge_with_diagnosis(
@@ -360,7 +370,7 @@ class OutputEvaluator:
         result: PipelineResult,
         structural: StructuralScores,
         roles: dict[str, str],
-    ) -> tuple[float, float, str, list[dict[str, Any]] | None, float, float]:
+    ) -> tuple[float, float, str, list[dict[str, Any]] | None, float, float, bool]:
         # Speed/cost are deterministic normalizations — compute them BEFORE
         # the judge call so we can ground the diagnosis with the normalized
         # values + their floors (otherwise the model sees only raw token
@@ -383,15 +393,20 @@ class OutputEvaluator:
         )
         data = _parse_json_dict(response.text)
         if data is None:
+            # Parse failure → neutral scores + no raw diagnoses + a flag so the
+            # caller (main.py) can decline to persist an experience whose
+            # scores are unreliable. The Diagnostician still runs (it derives
+            # what it can from the structural floor), but a parse-failure run
+            # must not pollute retrieval with garbage neutral-scored rows.
             log.warning("_judge_with_diagnosis: parse failure; returning neutral scores + no raw diagnoses")
-            return 0.5, 0.5, "judge parse failed", None, speed, cost
+            return 0.5, 0.5, "judge parse failed", None, speed, cost, True
         acc = float(data.get("accuracy", 0.0))
         comp = float(data.get("completeness", 0.0))
         rationale = str(data.get("rationale", ""))
         raw = data.get("diagnoses")
         if not isinstance(raw, list):
             raw = None
-        return acc, comp, rationale, raw, speed, cost
+        return acc, comp, rationale, raw, speed, cost, False
 
 
 __all__ = ["OutputEvaluator", "SPEED_SLA_SECONDS", "COST_BUDGET_TOKENS"]

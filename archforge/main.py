@@ -179,12 +179,13 @@ def run_cmd(
     # sanitizes the raw list (clamp roots, fallback to rules on parse
     # failure, augment deterministic structural facts).
     evaluator = OutputEvaluator(llm=llm)
-    output, raw_diagnoses = evaluator.evaluate_with_diagnosis(
+    output, raw_diagnoses, judge_parse_failed = evaluator.evaluate_with_diagnosis(
         task, result, structural=structural, roles=roles,
     )
     log.info(
-        "step 6/8: scores accuracy=%.3f completeness=%.3f speed=%.3f cost=%.3f",
+        "step 6/8: scores accuracy=%.3f completeness=%.3f speed=%.3f cost=%.3f%s",
         output.accuracy, output.completeness, output.speed_normalized, output.cost_normalized,
+        " [PARSE FAILED]" if judge_parse_failed else "",
     )
 
     exp = Experience(
@@ -215,7 +216,22 @@ def run_cmd(
         exp.structural.critical_path_length, exp.structural.parallelism_ratio,
     )
 
-    if not no_store:
+    if judge_parse_failed:
+        # The judge response failed to parse → scores are the neutral 0.5/0.5
+        # midpoint, NOT a real evaluation. Persisting this experience would
+        # pollute retrieval with a garbage-scored row, and a downchain run
+        # replaying it would inherit bogus scores + a possibly-misleading
+        # diagnosis set. Decline to store (the run's own output is still
+        # printed to the user above).
+        log.warning(
+            "step 7/8: judge parse failure — not persisting experience id=%s "
+            "(scores unreliable)", exp.id,
+        )
+        click.echo(
+            "  (judge parse failure — experience not stored; scores unreliable)",
+            err=True,
+        )
+    elif not no_store:
         log.info("step 7/8: persisting experience id=%s", exp.id)
         store.append(exp)
         # Re-save index after append so the next invocation has it.
