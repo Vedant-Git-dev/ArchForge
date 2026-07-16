@@ -10,10 +10,20 @@ An Intervention is a *declarative description of a Phase 2.1 primitive call*:
                            mutation primitive
   - `target_slot`        : a TARGET_SLOTS abstraction the Architect (Phase 2.3)
                            resolves to concrete node ids against a live pipeline
-  - `agent_to_insert`    : the primitive to insert/swap, or None when the
-                           mutation inserts nothing (delete/merge) or derives
-                           the type at resolution (parallelize → the target
-                           node's own agent_type)
+  - `agent_to_insert`    : the primitive to insert/swap BY CONCRETE NAME, or
+                           None when the mutation inserts nothing (delete/merge)
+                           or derives the type at resolution (parallelize → the
+                           target node's own agent_type) or names a ROLE instead
+                           (see `agent_role`)
+  - `agent_role`         : for insert, the ROLE of the primitive to insert,
+                           resolved from the active pool at dispatch (Task 6).
+                           Mutually exclusive with `agent_to_insert`: an
+                           intervention names the primitive EITHER by a
+                           concrete name (the future `critic` seed) OR by role
+                           (the `no_validator` seed → ROLE_VALIDATE). Naming by
+                           role is what makes the same intervention work across
+                           arbitrary primitive vocabularies — it never bakes in
+                           a primitive name like `fact_checker`.
 
 So the Architect's mutation step (2.3) becomes a dispatch table:
   diagnosis → match_by_root → resolve target_slot → call the 2.1 primitive.
@@ -46,6 +56,8 @@ from ..config import (
     INTERVENTION_SUCCESS_PRIOR,
     MUTATION_TYPES,
     ROLE_GENERATE,
+    ROLE_VALIDATE,
+    ROLES,
     STRUCTURAL_ROOTS,
     TARGET_SLOTS,
 )
@@ -71,7 +83,8 @@ class Intervention:
     diagnosis_pattern: str  # a STRUCTURAL_ROOTS value (the match key)
     mutation_type: str      # a MUTATION_TYPES verb (a Phase 2.1 primitive)
     target_slot: str        # a TARGET_SLOTS abstraction (resolved in 2.3)
-    agent_to_insert: str | None = None
+    agent_to_insert: str | None = None  # concrete primitive name (OR use agent_role)
+    agent_role: str | None = None       # role to resolve from the pool (Task 6)
 
     # Learned state — Phase 2.4 wires the updates. Carried now at a neutral
     # prior (config.INTERVENTION_SUCCESS_PRIOR) so the dataclass round-trips
@@ -103,14 +116,30 @@ class Intervention:
             raise ValueError(
                 f"Intervention {self.id!r}: target_slot "
                 f"{self.target_slot!r} not in TARGET_SLOTS")
-        if self.mutation_type in _INSERTS_AGENT and not self.agent_to_insert:
-            raise ValueError(
-                f"Intervention {self.id!r}: mutation_type {self.mutation_type!r} "
-                "requires a concrete agent_to_insert")
-        if self.mutation_type in _NO_INSERTED_AGENT and self.agent_to_insert:
+        # An insert/swap names the primitive to insert/swap EITHER by a
+        # concrete name (agent_to_insert) OR by role (agent_role) — never
+        # both, never neither. Role-based naming (Task 6) is what makes a
+        # seed like no_validator work across arbitrary primitive
+        # vocabularies: it says "the validate-primitive the pool offers",
+        # not "fact_checker".
+        if self.mutation_type in _INSERTS_AGENT:
+            if not self.agent_to_insert and not self.agent_role:
+                raise ValueError(
+                    f"Intervention {self.id!r}: mutation_type {self.mutation_type!r} "
+                    "requires a concrete agent_to_insert OR an agent_role")
+            if self.agent_to_insert and self.agent_role:
+                raise ValueError(
+                    f"Intervention {self.id!r}: specify agent_to_insert OR "
+                    f"agent_role, not both")
+        if self.mutation_type in _NO_INSERTED_AGENT and (
+                self.agent_to_insert or self.agent_role):
             raise ValueError(
                 f"Intervention {self.id!r}: mutation_type {self.mutation_type!r} "
                 "must not set agent_to_insert (inserts nothing / derives it)")
+        if self.agent_role is not None and self.agent_role not in ROLES:
+            raise ValueError(
+                f"Intervention {self.id!r}: agent_role {self.agent_role!r} "
+                "not in ROLES")
 
     # ----- serialization -----
 
@@ -121,6 +150,7 @@ class Intervention:
             "mutation_type": self.mutation_type,
             "target_slot": self.target_slot,
             "agent_to_insert": self.agent_to_insert,
+            "agent_role": self.agent_role,
             "success_rate": self.success_rate,
             "times_tried": self.times_tried,
             "times_helped": self.times_helped,
@@ -137,6 +167,7 @@ class Intervention:
             mutation_type=data["mutation_type"],
             target_slot=data["target_slot"],
             agent_to_insert=data.get("agent_to_insert"),
+            agent_role=data.get("agent_role"),
             success_rate=data.get("success_rate", INTERVENTION_SUCCESS_PRIOR),
             times_tried=data.get("times_tried", 0),
             times_helped=data.get("times_helped", 0),
@@ -169,11 +200,18 @@ def default_interventions() -> list[Intervention]:
             # BEFORE the writer, not after: the validator's verdict must flow
             # INTO the producer of the final output. A validator after the
             # writer validates into a void — the engine extracts the writer's
-            # `output` regardless of position, so a post-writer fact_checker's
+            # `output` regardless of position, so a post-writer validator's
             # verdicts would be discarded. This matches the default pipeline's
             # own shape (... → summarizer → fact_checker → writer).
             target_slot="before_generate",
-            agent_to_insert="fact_checker",
+            # ROLE, not a primitive name (Task 6): the seed names the validate
+            # ROLE and the Architect resolves whichever validate primitive the
+            # ACTIVE pool offers at dispatch (fact_checker in the default pool;
+            # a custom pipeline's "verifier" / "checker" / any name). The id
+            # still says "fact_checker" as a human-scannable historical label,
+            # but NOTHING in the architecture depends on that name — the same
+            # intervention inserts a validator across arbitrary vocabularies.
+            agent_role=ROLE_VALIDATE,
         ),
         Intervention(
             id="iv-serial_bottleneck-parallelize",
@@ -270,7 +308,11 @@ def is_structurally_eligible(
     """Can `iv` typecheck against reality, WITHOUT a diagnosis?
 
     Two diagnosis-free gates:
-      (1) pool — `agent_to_insert`, when concrete, is a registered primitive.
+      (1) pool — the primitive to insert is resolvable from the pool: either
+          a concrete `agent_to_insert` is a registered primitive, OR an
+          `agent_role` is offered by ≥1 primitive in the pool (Task 6 — a
+          role-based seed like no_validator names the validate ROLE, and the
+          gate confirms the pool HAS a validate-role primitive to insert).
       (2) topology — a diagnosis-free `target_slot` resolves to ≥1 real node
           in this pipeline. The thresholds reuse the Diagnostician's own
           DIAGNOSIS_* floors, so an intervention for root X is structurally
@@ -291,8 +333,13 @@ def is_structurally_eligible(
     if pipeline.has_cycle():
         return False
 
-    # (1) pool gate
+    resolver = RoleResolver.from_pool(pool)
+
+    # (1) pool gate — concrete name registered OR a named role is offered.
     if iv.agent_to_insert is not None and iv.agent_to_insert not in pool.names():
+        return False
+    if iv.agent_role is not None and not any(
+            r == iv.agent_role for r in resolver.as_dict().values()):
         return False
 
     # (2) topology gate, diagnosis-free slots only
@@ -303,7 +350,6 @@ def is_structurally_eligible(
         # seed, not the gate: no_validator uses before_generate (verdict must
         # flow into the generator); no_critique_loop uses after_generate (and
         # is shelved for cycle/terminal reasons — see the seed comment).
-        resolver = RoleResolver.from_pool(pool)
         return pipeline.has_role(ROLE_GENERATE, resolver)
     if iv.target_slot == "deep_chain_nodes":
         return pipeline.depth() >= DIAGNOSIS_DEEP_CHAIN_MIN

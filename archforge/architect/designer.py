@@ -252,21 +252,52 @@ class Architect:
             return None, False
         mt = iv.mutation_type
         if mt == "delete":
-            return self._dispatch_delete(iv, diag, pipeline)
+            return self._dispatch_delete(iv, diag, pipeline, resolver)
         if mt == "insert":
             return self._dispatch_insert(iv, diag, pipeline, resolver)
         if mt == "parallelize":
             return self._dispatch_parallelize(iv, diag, pipeline)
         if mt == "merge":
-            return self._dispatch_merge(iv, diag, pipeline)
+            return self._dispatch_merge(iv, diag, pipeline, resolver)
         if mt == "swap":
-            return self._dispatch_swap(iv, diag, pipeline)
+            return self._dispatch_swap(iv, diag, pipeline, resolver)
         return None, False
 
     # ----- per-mutation resolvers -----
 
+    @staticmethod
+    def _keeps_generator(
+        before: PipelineDAG, after: PipelineDAG, resolver: RoleResolver,
+    ) -> bool:
+        """Generator-removal invariant (Task 5): a mutation must NOT eliminate
+        the last generate-role node. The optimizer must not reward-hack by
+        dropping the generator to cut cost. True iff `after` still has a
+        generate-role node, OR `before` had none to begin with (a non-generator
+        mutation on a generator-less pipeline is fine — there was nothing to
+        protect). Role-keyed via the resolver so the guard holds across
+        arbitrary primitive vocabularies, keeping the agent-agnostic PipelineDAG
+        mutation primitives clean.
+        """
+        if not before.has_role(ROLE_GENERATE, resolver):
+            return True
+        return after.has_role(ROLE_GENERATE, resolver)
+
+    @staticmethod
+    def _resolve_role_primitive(role: str | None, resolver: RoleResolver) -> str | None:
+        """Pick a concrete primitive name of `role` from the pool's resolver,
+        deterministically. Sorted by name so the same pool yields the same
+        insertion (reproducible). A role-based intervention (Task 6) doesn't
+        care WHICH validate primitive a pool offers, only that it offers one;
+        this makes the concrete choice. None if the pool has none of `role`.
+        """
+        if role is None:
+            return None
+        names = sorted(n for n, r in resolver.as_dict().items() if r == role)
+        return names[0] if names else None
+
     def _dispatch_delete(
         self, iv: Intervention, diag: Diagnosis, pipeline: PipelineDAG,
+        resolver: RoleResolver,
     ) -> tuple[PipelineDAG | None, bool]:
         # `diagnosis_targets` resolves to the diagnosis's own target_nodes.
         # A delete with no pinned targets is ungrounded → skip (don't guess).
@@ -274,12 +305,26 @@ class Architect:
         if not targets:
             log.debug("dispatch delete %s: no target_nodes → skip", iv.id)
             return None, False
+        # Generator invariant (Task 5): per-target. Try the delete; if it would
+        # eliminate the last generate-role node, skip THAT target while still
+        # removing the rest of a multi-target delete (legitimate non-generator
+        # deletions are preserved). Re-checked against the live (post-prior-
+        # deletes) pipeline each iteration, so a target set that would TOGETHER
+        # remove every generator has its last one retained automatically —
+        # order-independent.
         any_deleted = False
         p = pipeline
         for t in targets:
-            if p.node_by_id(t) is not None:
-                p = p.delete_node(t)
-                any_deleted = True
+            if p.node_by_id(t) is None:
+                continue
+            cand = p.delete_node(t)
+            if not self._keeps_generator(p, cand, resolver):
+                log.debug(
+                    "dispatch delete %s: target %s is the only generator → skip",
+                    iv.id, t)
+                continue
+            p = cand
+            any_deleted = True
         return (p, True) if any_deleted else (None, False)
 
     def _dispatch_insert(
@@ -287,16 +332,36 @@ class Architect:
         resolver: RoleResolver,
     ) -> tuple[PipelineDAG | None, bool]:
         slot = iv.target_slot  # before_generate | after_generate
-        # Idempotency: don't insert a validate-role node when one's present.
-        # (Backs the no_validator seed; a broader "role-already-present" guard
-        # generalizes once more insert seeds land.) Keyed on ROLE, not name, so
-        # a `fact_checker` OR a differently-named validate primitive both gate.
-        if iv.agent_to_insert and resolver.role_of(iv.agent_to_insert) == ROLE_VALIDATE:
-            if pipeline.has_role(ROLE_VALIDATE, resolver):
+        # Resolve the concrete primitive to insert. A role-based intervention
+        # (Task 6) carries NO hardcoded name — it names the ROLE and the
+        # Architect picks whichever primitive of that role the active pool
+        # offers, so the same intervention works across arbitrary vocabularies
+        # (no_validator → the pool's validate primitive, whatever it's called).
+        # A concrete-name intervention (e.g. the future critic seed) inserts
+        # as-is.
+        insert_name = iv.agent_to_insert
+        if insert_name is None:
+            insert_name = self._resolve_role_primitive(iv.agent_role, resolver)
+            if insert_name is None:
                 log.debug(
-                    "dispatch insert %s: a validate-role node already present → skip",
-                    iv.id)
+                    "dispatch insert %s: no %s-role primitive in pool → skip",
+                    iv.id, iv.agent_role)
                 return None, False
+            insert_role = iv.agent_role
+        else:
+            insert_role = resolver.role_of(insert_name)
+        # Idempotency: don't insert a validate-role node when one's present.
+        # Keyed on ROLE — derived from `agent_role` for the role-based seed or
+        # from the concrete name's resolved role — so a `fact_checker` OR a
+        # pool's differently-named validate primitive both gate. Only
+        # ROLE_VALIDATE triggers the skip: a critic seed (analyze role) still
+        # inserts even though an analyze node is already present (having an
+        # analyzer doesn't preclude a critique loop).
+        if insert_role == ROLE_VALIDATE and pipeline.has_role(ROLE_VALIDATE, resolver):
+            log.debug(
+                "dispatch insert %s: a validate-role node already present → skip",
+                iv.id)
+            return None, False
         gen_nodes = pipeline.nodes_by_role(ROLE_GENERATE, resolver)
         if not gen_nodes:
             log.debug("dispatch insert %s: no generate-role node → skip", iv.id)
@@ -304,9 +369,9 @@ class Architect:
         p = pipeline
         for gen in gen_nodes:
             if slot == "before_generate":
-                p = p.insert_before(gen.id, iv.agent_to_insert)
+                p = p.insert_before(gen.id, insert_name)
             else:  # after_generate
-                p = p.insert_after(gen.id, iv.agent_to_insert)
+                p = p.insert_after(gen.id, insert_name)
         return p, True
 
     def _dispatch_parallelize(
@@ -327,6 +392,7 @@ class Architect:
 
     def _dispatch_merge(
         self, iv: Intervention, diag: Diagnosis, pipeline: PipelineDAG,
+        resolver: RoleResolver,
     ) -> tuple[PipelineDAG | None, bool]:
         # `deep_chain_nodes` resolves to the diagnosis's target_nodes when they
         # form a consecutive chain. The critical-path fallback (collapse the
@@ -344,23 +410,45 @@ class Architect:
         except ValueError as e:
             log.debug("dispatch merge %s: %s→ skip", iv.id, e)
             return None, False
+        # Generator invariant (Task 5): a merge collapses the chain to the
+        # first node's agent_type. If the only generate node was inside the
+        # chain and the first node isn't a generator, the merge would remove
+        # the last generator → refuse the WHOLE merge (the chain is the unit;
+        # a partial merge isn't a simple-chain collapse). No live deep_chain
+        # seed pins the generator, but the invariant holds uniformly.
+        if not self._keeps_generator(pipeline, p, resolver):
+            log.debug("dispatch merge %s: would remove the only generator → skip", iv.id)
+            return None, False
         return p, True
 
     def _dispatch_swap(
         self, iv: Intervention, diag: Diagnosis, pipeline: PipelineDAG,
+        resolver: RoleResolver,
     ) -> tuple[PipelineDAG | None, bool]:
         # No swap seed ships today (over_chunking's "swap chunker for a variant"
         # would be one, once a distinct variant exists). Implemented for
         # completeness: swap each pinned target to iv.agent_to_insert in place.
+        # swap resolves a concrete name (agent_to_insert) — a role-based swap is
+        # a future generalization; a swap carrying agent_role instead no-ops.
         targets = list(diag.target_nodes)
         if not targets or not iv.agent_to_insert:
             return None, False
         any_swapped = False
         p = pipeline
         for t in targets:
-            if p.node_by_id(t) is not None:
-                p = p.replace_node(t, iv.agent_to_insert)
-                any_swapped = True
+            if p.node_by_id(t) is None:
+                continue
+            cand = p.replace_node(t, iv.agent_to_insert)
+            # Generator invariant (Task 5): replacing the only generator's
+            # agent_type with a non-generator would eliminate the last
+            # generator → skip THAT target (per-target, like delete).
+            if not self._keeps_generator(p, cand, resolver):
+                log.debug(
+                    "dispatch swap %s: target %s is the only generator → skip",
+                    iv.id, t)
+                continue
+            p = cand
+            any_swapped = True
         return (p, True) if any_swapped else (None, False)
 
     # ----- helper -----
