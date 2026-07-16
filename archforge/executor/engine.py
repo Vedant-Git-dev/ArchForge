@@ -84,27 +84,60 @@ def _build_node_input(
     return {**base, "predecessors": pred_outputs}
 
 
-def _extract_final_output(node_outputs: dict[str, AgentResult], pipeline: PipelineDAG) -> str:
-    """Pick the user-facing output of the pipeline.
+def _extract_final_output(
+    node_outputs: dict[str, AgentResult],
+    pipeline: PipelineDAG,
+    resolver,
+) -> str:
+    """Pick the user-facing output of the pipeline, keyed on `TERMINAL_ROLE`.
 
-    Convention: the writer-node's `output` field. If the pipeline has none,
-    fall back to a JSON dump of the last leaf's full output.
+    Replaces the hardcoded ``agent_type == "writer"`` terminal detection with
+    role-keyed resolution so a pipeline whose generate primitive is named
+    anything else (e.g. ``composer``) extracts just as well. Candidate order:
+
+      1. a generate-role LEAF, topological-last among several — the terminal
+         stage whose output the user receives;
+      2. any generate-role node (a generate stage that is not a leaf still
+         produces the deliverable — mirrors the original full-node scan);
+      3. the topological-last leaf overall (the original writer→last-leaf
+         fallback, generalized to any terminal role).
+
+    Reads the matched node result's ``output`` field (falling back to
+    ``text``). `resolver` is duck-typed (exposes ``role_of_node``); the engine
+    builds one from its pool at init. Acyclic by contract — `Engine.run`
+    refuses a cyclic pipeline before it reaches here.
     """
-    for node in pipeline.nodes:
-        if node.agent_type == "writer" and node.id in node_outputs:
-            writer_out = node_outputs[node.id].output
-            # Writer system prompt guarantees an `output` string field.
-            return str(writer_out.get("output", writer_out.get("text", "")))
-    # Fallback: serialise the last leaf.
-    leaves = pipeline.leaves()
-    if leaves:
-        last_result = node_outputs.get(leaves[-1].id)
-        if last_result is not None:
-            if last_result.output.get("output"):
-                return str(last_result.output["output"])
-            if last_result.output.get("text"):
-                return str(last_result.output["text"])
-    return ""
+    from ..config import TERMINAL_ROLE
+
+    order = pipeline.topo_order()
+    idx = {n.id: i for i, n in enumerate(order)}
+
+    def extract(node: AgentNode) -> str | None:
+        r = node_outputs.get(node.id)
+        if r is None:
+            return None
+        o = r.output
+        if o.get("output"):
+            return str(o["output"])
+        if o.get("text"):
+            return str(o["text"])
+        return None
+
+    def topo_last(group):
+        for n in sorted(group, key=lambda nd: idx[nd.id], reverse=True):
+            v = extract(n)
+            if v is not None:
+                return v
+        return None
+
+    v = topo_last(pipeline.leaves_by_role(TERMINAL_ROLE, resolver))
+    if v is not None:
+        return v
+    v = topo_last(pipeline.nodes_by_role(TERMINAL_ROLE, resolver))
+    if v is not None:
+        return v
+    v = topo_last(pipeline.leaves())
+    return v if v is not None else ""
 
 
 class Engine:
@@ -121,6 +154,11 @@ class Engine:
     ) -> None:
         self.llm = llm
         self.pool = pool or default_pool()
+        # Role-keyed terminal-stage resolution (replaces the hardcoded
+        # "writer" name check in final-output extraction). Built from the
+        # same pool the engine resolves primitives through, so a node is
+        # identified as the terminal by its role, not its primitive name.
+        self._resolver = self.pool.role_resolver()
 
     def run(
         self,
@@ -191,7 +229,7 @@ class Engine:
             ))
 
         wall_dt = time.perf_counter() - wall_start
-        final_output = _extract_final_output(node_outputs, pipeline)
+        final_output = _extract_final_output(node_outputs, pipeline, self._resolver)
         log.info(
             "run: pipeline done id=%s wall=%.3fs tokens=%d final_len=%d",
             pipeline.id, wall_dt, total_prompt + total_completion, len(final_output),

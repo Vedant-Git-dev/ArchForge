@@ -196,6 +196,113 @@ TARGET_SLOTS: tuple[str, ...] = (
 )
 
 
+# ─── Roles vocabulary (Pipeline-agnostic resolution) ──────────────────────────
+#
+# Every primitive carries one semantic `role` on its Primitive definition. The
+# Executor, Evaluator, and Architect key off a node's ROLE — not its primitive
+# NAME — so that two pipelines with completely different primitive names but
+# identical roles behave identically. This is the vocabulary that resolution
+# (archforge.core.roles.RoleResolver) and the terminal-stage detection lean on,
+# and it is the foundation for the pipeline-agnostic mutation logic.
+
+ROLES: tuple[str, ...] = (
+    "ingest",     # take raw input in (reader, fetcher, ...)
+    "transform",  # reshape input without judging it (chunker, normalizer, ...)
+    "analyze",    # interpret / classify / extract (classifier, summarizer, ...)
+    "validate",  # verify claims / output against evidence (fact_checker, ...)
+    "generate",   # produce the final deliverable (writer, composer, ...)
+    "compose",    # merge / fan-in / route between branches (vote, fan_in, ...)
+)
+
+# Named members of ROLES, so callers import a symbol instead of string-typing a
+# role and risking a typo the vocabulary can't catch.
+ROLE_INGEST = "ingest"
+ROLE_TRANSFORM = "transform"
+ROLE_ANALYZE = "analyze"
+ROLE_VALIDATE = "validate"
+ROLE_GENERATE = "generate"
+ROLE_COMPOSE = "compose"
+
+# The role of the single node whose output the user receives. Resolution (the
+# engine's final-output extraction and the structural evaluator's terminal
+# leaf) used to hardcode the primitive NAME "writer"; this constant keys it on
+# role instead. Any generate-role node is now a terminal candidate.
+TERMINAL_ROLE = ROLE_GENERATE
+
+# The role a resolver falls back to when a primitive name is unknown to it
+# (a not-yet-registered evolved primitive, or a custom YAML drop-in the pool
+# hasn't loaded). "analyze" is the neutral middle of the vocabulary — neither
+# ingest/generate (which carry positional semantics) nor validate/compose
+# (which carry gating semantics) — so a misclassified name does the least
+# structural harm. Kept inert: the resolver exposes the role; nothing forces it.
+DEFAULT_ROLE = ROLE_ANALYZE
+
+
+# ─── Faithfulness evaluation (future Evaluator surface) ──────────────────────
+#
+# A planned evaluation surface: does the final output stay faithful to the
+# evidence the pipeline gathered, vs inventing beyond it? This is distinct from
+# `accuracy` (did the output satisfy the task?) and from `no_validator` (was a
+# validate-role node present?) — a pipeline CAN have a validator and still
+# produce an unfaithful answer. The knobs land here now so a later phase wires
+# them in without a config restructure and without a STRUCTURAL_ROOTS
+# relationship change.
+#
+# Deliberately inert by default: FAITHFULNESS_ENABLED is False and the weight is
+# 0.0, so the existing (Phase 1-locked) composite and structural scoring are
+# untouched — phase1.md pins the composite at 50% accuracy / 25% speed / 25%
+# cost until Phase 6 makes weights learnable, and this respects that lock.
+#
+# FAITHFULNESS_ROOT is kept OUT of STRUCTURAL_ROOTS so a faithfulness diagnosis
+# can never pivot the intervention matcher today (it would name a structural
+# fix for a non-structural cause). It becomes a match key only when the
+# faithfulness evaluator itself ships.
+FAITHFULNESS_ENABLED = False
+FAITHFULNESS_LOW = 0.6        # faithfulness normalized below this is "unfaithful"
+FAITHFULNESS_ROOT = "unfaithful_output"
+FAITHFULNESS_WEIGHT = 0.0     # blend weight into composite — 0.0 ⇒ off
+
+
+# ─── Intervention learning (Reasoned Mutations — diagnosis-driven) ────────────
+#
+# NOTE: this system is diagnosis-driven, NOT exploration-driven. The Architect
+# matches each diagnosis's `structural_root` to candidate interventions via
+# InterventionLibrary.match_by_root and selects max(cands, key=(success_rate,
+# id)). There is NO random-mutation exploration branch anywhere in the code
+# (the only "random" in archforge/ is a comment about the pipeline id). So
+# these knobs govern LEARNED-SELECTION and OUTCOME-RECORDING — there is
+# explicitly no "explore/exploit threshold" or random-mutation gate among them.
+#
+# Landed now (inert / pre-wired) so Phase 2.4 (intervention success tracking)
+# is pure-update-no-migration, mirroring how Phase 1 carried empty diagnosis
+# placeholders into Phase 2.
+
+INTERVENTION_LEARNING_ENABLED = True
+# Gate: when True the Architect prefers the matched candidate with the highest
+# learned success_rate; when False it applies seeds in fixed order. The current
+# Architect always ranks by success_rate, so True is a no-op today and becomes
+# the switch a "trust learned rate vs seed order" policy flips later.
+
+INTERVENTION_SUCCESS_PRIOR = 0.5
+# Starting success_rate for an unobserved (freshly seeded or newly discovered)
+# intervention. A NEUTRAL prior — neither trusted nor distrusted — until a run
+# records an outcome. Replaces the literal 0.5 that lived inline in
+# interventions.py. NOT an "explore/exploit boundary"; there is no random
+# mutation to bound.
+
+INTERVENTION_MIN_SAMPLES = 0
+# times_tried ≥ this before the learned rate is trusted OVER the prior. A
+# freshly-seeded intervention sits at the prior until it has been observed
+# enough to learn from. 0 ⇒ trust the rate from the first try.
+
+INTERVENTION_HELP_MIN_DELTA = 0.0
+# An intervention is recorded as "helped" when the post-run composite beats the
+# pre-intervention baseline by ≥ this. This is an OUTCOME-RECORDING threshold
+# (did the fix help?), the opposite axis from a random-mutation "exploration"
+# knob. 0.0 ⇒ any improvement counts. Phase 2.4 consumes this when it bumps
+# times_tried/times_helped and recomputes success_rate.
+
+
 __all__ = [
     "DATA_DIR_ENV",
     "DEFAULT_DATA_DIR",
@@ -222,4 +329,21 @@ __all__ = [
     "STRUCTURAL_ROOTS",
     "MUTATION_TYPES",
     "TARGET_SLOTS",
+    "ROLES",
+    "ROLE_INGEST",
+    "ROLE_TRANSFORM",
+    "ROLE_ANALYZE",
+    "ROLE_VALIDATE",
+    "ROLE_GENERATE",
+    "ROLE_COMPOSE",
+    "TERMINAL_ROLE",
+    "DEFAULT_ROLE",
+    "FAITHFULNESS_ENABLED",
+    "FAITHFULNESS_LOW",
+    "FAITHFULNESS_ROOT",
+    "FAITHFULNESS_WEIGHT",
+    "INTERVENTION_LEARNING_ENABLED",
+    "INTERVENTION_SUCCESS_PRIOR",
+    "INTERVENTION_MIN_SAMPLES",
+    "INTERVENTION_HELP_MIN_DELTA",
 ]

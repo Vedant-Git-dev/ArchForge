@@ -43,11 +43,14 @@ from typing import Iterable, Iterator
 from ..config import (
     DIAGNOSIS_BOTTLENECK_MIN_PATH,
     DIAGNOSIS_DEEP_CHAIN_MIN,
+    INTERVENTION_SUCCESS_PRIOR,
     MUTATION_TYPES,
+    ROLE_GENERATE,
     STRUCTURAL_ROOTS,
     TARGET_SLOTS,
 )
 from ..core.pipeline import PipelineDAG
+from ..core.roles import RoleResolver
 from ..executor.agents.registry import PrimitivePool
 from ..logging import get_logger
 
@@ -70,11 +73,15 @@ class Intervention:
     target_slot: str        # a TARGET_SLOTS abstraction (resolved in 2.3)
     agent_to_insert: str | None = None
 
-    # Learned state — Phase 2.4 wires the updates. Carried now at a 0.5 prior
-    # so the dataclass round-trips through JSON from day one. 0.5 is the
-    # plan's own exploit/explore boundary: an unobserved seeded fix sits
-    # exactly at it — neither trusted nor distrusted until a run earns either.
-    success_rate: float = 0.5
+    # Learned state — Phase 2.4 wires the updates. Carried now at a neutral
+    # prior (config.INTERVENTION_SUCCESS_PRIOR) so the dataclass round-trips
+    # through JSON from day one. A NEUTRAL prior — neither trusted nor
+    # distrusted — until a run records an outcome. This system is
+    # diagnosis-driven (the Architect selects the matched candidate by
+    # success_rate), NOT exploration-driven: there is no random-mutation
+    # explore/exploit branch, so the prior is not an "explore/explore
+    # boundary" — it is simply where an unobserved fix starts.
+    success_rate: float = INTERVENTION_SUCCESS_PRIOR
     times_tried: int = 0
     times_helped: int = 0
     last_updated: datetime | None = None
@@ -130,7 +137,7 @@ class Intervention:
             mutation_type=data["mutation_type"],
             target_slot=data["target_slot"],
             agent_to_insert=data.get("agent_to_insert"),
-            success_rate=data.get("success_rate", 0.5),
+            success_rate=data.get("success_rate", INTERVENTION_SUCCESS_PRIOR),
             times_tried=data.get("times_tried", 0),
             times_helped=data.get("times_helped", 0),
             last_updated=last,
@@ -257,10 +264,6 @@ class InterventionLibrary:
 # ─── structural eligibility (diagnosis-free) ────────────────────────────────
 
 
-def _role_map(pool: PrimitivePool) -> dict[str, str]:
-    return {name: p.role for name, p in pool.primitives().items()}
-
-
 def is_structurally_eligible(
     iv: Intervention, pipeline: PipelineDAG, pool: PrimitivePool,
 ) -> bool:
@@ -272,7 +275,10 @@ def is_structurally_eligible(
           in this pipeline. The thresholds reuse the Diagnostician's own
           DIAGNOSIS_* floors, so an intervention for root X is structurally
           eligible exactly when the topology is in the regime where root X's
-          diagnosis could fire.
+          diagnosis could fire. The generate/validate topology checks key on
+          ROLE (via a resolver built from the pool), not primitive name, so an
+          intervention is eligible for a pipeline whose generate primitive is
+          named anything at all.
 
     Diagnosis-aware slots (`diagnosis_targets`) cannot be resolved without the
     diagnosis; this gate checks only the pool half and returns True for them.
@@ -291,15 +297,14 @@ def is_structurally_eligible(
 
     # (2) topology gate, diagnosis-free slots only
     if iv.target_slot in ("before_generate", "after_generate"):
-        # Both insert slots resolve to the generate-role node (writer); the
-        # eligibility check is identical — a generate node must exist to
-        # insert relative to. WHICH side (before vs after) is a correctness
-        # property of the seed, not the gate: no_validator uses before_generate
-        # (verdict must flow into the writer); no_critique_loop uses
-        # after_generate (and is shelved for cycle/terminal reasons — see the
-        # seed comment).
-        roles = _role_map(pool)
-        return any(roles.get(n.agent_type) == "generate" for n in pipeline.nodes)
+        # Both insert slots resolve to the generate-role node; the eligibility
+        # check is identical — a generate node must exist to insert relative
+        # to. WHICH side (before vs after) is a correctness property of the
+        # seed, not the gate: no_validator uses before_generate (verdict must
+        # flow into the generator); no_critique_loop uses after_generate (and
+        # is shelved for cycle/terminal reasons — see the seed comment).
+        resolver = RoleResolver.from_pool(pool)
+        return pipeline.has_role(ROLE_GENERATE, resolver)
     if iv.target_slot == "deep_chain_nodes":
         return pipeline.depth() >= DIAGNOSIS_DEEP_CHAIN_MIN
     if iv.target_slot == "bottleneck_node":

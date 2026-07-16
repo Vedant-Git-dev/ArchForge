@@ -29,6 +29,7 @@ import numpy as np
 
 from ..core.experience import Diagnosis, Experience
 from ..core.pipeline import PipelineDAG
+from ..core.roles import RoleResolver
 from ..core.task import Task
 from ..executor.agents.registry import PrimitivePool, default_pool
 from ..executor.embeddings import EmbeddingClient
@@ -36,15 +37,13 @@ from ..store.experience_store import ExperienceStore, ScoredHit
 from ..config import (
     DEFAULT_PIPELINE_AGENTS,
     DEFAULT_REPLAY_SIMILARITY_THRESHOLD,
+    ROLE_GENERATE,
+    ROLE_VALIDATE,
 )
 from .interventions import Intervention, InterventionLibrary, is_structurally_eligible
 from ..logging import get_logger
 
 log = get_logger("architect")
-
-
-def _role_map(pool: PrimitivePool) -> dict[str, str]:
-    return {name: p.role for name, p in pool.primitives().items()}
 
 
 @dataclass
@@ -207,7 +206,7 @@ class Architect:
         if not matched:
             return pipeline, []
 
-        roles = _role_map(pool)
+        resolver = RoleResolver.from_pool(pool)
         # Apply order: deletes first (so an insert's before_generate target
         # hasn't moved), inserts next (added to the critical path before the
         # reshape measures it), reshape last (recomputes critical path on the
@@ -226,7 +225,7 @@ class Architect:
             for diag, iv in group(phase_types):
                 if iv.id in applied_ids:
                     continue  # one application per intervention per run
-                new_p, applied = self._dispatch(iv, diag, p, pool, roles)
+                new_p, applied = self._dispatch(iv, diag, p, pool, resolver)
                 if applied:
                     applied_ids.append(iv.id)
                     p = new_p  # _dispatch guarantees non-None when applied
@@ -238,7 +237,7 @@ class Architect:
         diag: Diagnosis,
         pipeline: PipelineDAG,
         pool: PrimitivePool,
-        roles: dict[str, str],
+        resolver: RoleResolver,
     ) -> tuple[PipelineDAG | None, bool]:
         """Resolve `iv`'s slot against (pipeline, diag) and apply the mutation.
 
@@ -255,7 +254,7 @@ class Architect:
         if mt == "delete":
             return self._dispatch_delete(iv, diag, pipeline)
         if mt == "insert":
-            return self._dispatch_insert(iv, diag, pipeline, roles)
+            return self._dispatch_insert(iv, diag, pipeline, resolver)
         if mt == "parallelize":
             return self._dispatch_parallelize(iv, diag, pipeline)
         if mt == "merge":
@@ -285,19 +284,20 @@ class Architect:
 
     def _dispatch_insert(
         self, iv: Intervention, diag: Diagnosis, pipeline: PipelineDAG,
-        roles: dict[str, str],
+        resolver: RoleResolver,
     ) -> tuple[PipelineDAG | None, bool]:
         slot = iv.target_slot  # before_generate | after_generate
         # Idempotency: don't insert a validate-role node when one's present.
         # (Backs the no_validator seed; a broader "role-already-present" guard
-        # generalizes once more insert seeds land.)
-        if iv.agent_to_insert and roles.get(iv.agent_to_insert) == "validate":
-            if any(roles.get(n.agent_type) == "validate" for n in pipeline.nodes):
+        # generalizes once more insert seeds land.) Keyed on ROLE, not name, so
+        # a `fact_checker` OR a differently-named validate primitive both gate.
+        if iv.agent_to_insert and resolver.role_of(iv.agent_to_insert) == ROLE_VALIDATE:
+            if pipeline.has_role(ROLE_VALIDATE, resolver):
                 log.debug(
                     "dispatch insert %s: a validate-role node already present → skip",
                     iv.id)
                 return None, False
-        gen_nodes = [n for n in pipeline.nodes if roles.get(n.agent_type) == "generate"]
+        gen_nodes = pipeline.nodes_by_role(ROLE_GENERATE, resolver)
         if not gen_nodes:
             log.debug("dispatch insert %s: no generate-role node → skip", iv.id)
             return None, False

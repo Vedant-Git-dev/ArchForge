@@ -21,6 +21,7 @@ import yaml
 
 from ...config import DATA_DIR_ENV
 from ...core.primitive import Primitive
+from ...core.roles import RoleResolver
 from .base import BaseAgent
 from .chunker import ChunkerAgent
 from .classifier import ClassifierAgent
@@ -69,6 +70,7 @@ class PrimitivePool:
         self._primitives: dict[str, Primitive] = {}
         self._data_dir = data_dir or default_data_dir()
         self._loaded_yamls = False
+        self._resolver: RoleResolver | None = None
 
     # ----- lookups -----
 
@@ -102,6 +104,20 @@ class PrimitivePool:
             self.get(name)
         return dict(self._primitives)
 
+    def role_resolver(self) -> RoleResolver:
+        """The {name → role} resolver for this pool's primitives.
+
+        Memoized after first build (the primitive set is fixed once the YAMLs
+        have loaded here; evolved primitives arriving at runtime in Phase 5+
+        invalidate the cache only if the base set itself changes). The single
+        producer of the role mapping the Executor / Evaluator / Architect
+        consume — replaces the ad-hoc ``{name: p.role ...}`` rebuilds that
+        used to live in main.py, designer, and interventions.
+        """
+        if self._resolver is None:
+            self._resolver = RoleResolver.from_primitives(self.primitives())
+        return self._resolver
+
     # ----- YAML overrides -----
 
     def _load_yamls(self) -> None:
@@ -134,4 +150,14 @@ def default_pool() -> PrimitivePool:
     return _default_pool
 
 
-__all__ = ["PrimitivePool", "default_pool", "default_data_dir"]
+def default_role_resolver() -> RoleResolver:
+    """The role resolver for the singleton default pool.
+
+    Mirrors ``default_pool()``: lazy, shared, memoized on the pool. The
+    callers that previously rebuilt ``{name: p.role ...}`` from
+    ``default_pool().primitives()`` use this instead.
+    """
+    return default_pool().role_resolver()
+
+
+__all__ = ["PrimitivePool", "default_pool", "default_role_resolver", "default_data_dir"]

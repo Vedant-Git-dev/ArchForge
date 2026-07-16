@@ -36,26 +36,36 @@ from ..logging import get_logger
 log = get_logger("evaluator.structural")
 
 
-def _terminal_node(pipeline: PipelineDAG) -> AgentNode | None:
-    """The single node whose output the user receives.
+def _default_resolver():
+    """Build a resolver from the singleton default pool, lazily.
 
-    Mirrors the engine's `_extract_final_output` convention: prefer a
-    `writer` leaf; otherwise the leaf that is last in topo order (the
-    de-facto final stage of a linear replay). Other leaves feed no one
-    and are counted as unused outputs.
+    Local imports keep the evaluator from coupling to the executor package at
+    import time (structural has no LLM/network needs of its own and is used on
+    the offline / no-API-key path); the resolver is only ever built when
+    `evaluate` is called WITHOUT a resolver, which the structural tests do).
     """
-    leaves = pipeline.leaves()
-    if not leaves:
-        return None
-    for leaf in leaves:
-        if leaf.agent_type == "writer":
-            return leaf
-    order = pipeline.topo_order()
-    order_index = {n.id: i for i, n in enumerate(order)}
-    return max(leaves, key=lambda n: order_index[n.id])
+    from ..core.roles import RoleResolver
+    from ..executor.agents.registry import default_pool
+
+    return RoleResolver.from_pool(default_pool())
 
 
-def _unused_outputs(pipeline: PipelineDAG) -> list[str]:
+def _terminal_node(pipeline: PipelineDAG, resolver) -> AgentNode | None:
+    """The single node whose output the user receives — keyed on `TERMINAL_ROLE`.
+
+    Mirrors the engine's `_extract_final_output` convention via the same
+    role-keyed generalization: prefer a `generate`-role leaf (topological-last
+    among several); otherwise the leaf that is last in topo order (the de-facto
+    final stage of a linear replay). Other leaves feed no one and are counted
+    as unused outputs. `resolver` is duck-typed; the evaluator builds one from
+    `default_pool()` when none is supplied.
+    """
+    from ..config import TERMINAL_ROLE
+
+    return pipeline.terminal_node_by_role(TERMINAL_ROLE, resolver)
+
+
+def _unused_outputs(pipeline: PipelineDAG, resolver) -> list[str]:
     """Leaf node ids whose output no downstream agent consumes.
 
     A well-formed pipeline has exactly one terminal leaf; every other
@@ -63,7 +73,7 @@ def _unused_outputs(pipeline: PipelineDAG) -> list[str]:
     (structural dead code) — distinct from runtime unused *values*, which
     a later phase can detect from execution traces.
     """
-    terminal = _terminal_node(pipeline)
+    terminal = _terminal_node(pipeline, resolver)
     if terminal is None:
         return []
     return [leaf.id for leaf in pipeline.leaves() if leaf.id != terminal.id]
@@ -98,11 +108,23 @@ def _redundant_agents(pipeline: PipelineDAG) -> list[str]:
 class StructuralEvaluator:
     """Compute `StructuralScores` from a pipeline's topology.
 
-    Stateless caller — instantiate once per session, like `OutputEvaluator`.
-    No LLM, no network; safe on the offline / no-API-key demo path.
+    See `evaluate` for the role-keyed terminal-leaf convention; otherwise
+    stateless — instantiate once per session, like `OutputEvaluator`.
     """
 
-    def evaluate(self, pipeline: PipelineDAG) -> StructuralScores:
+    def evaluate(self, pipeline: PipelineDAG, *, resolver=None) -> StructuralScores:
+        """Compute `StructuralScores` from a pipeline's topology.
+
+        `resolver` keys the terminal leaf on its primitive's ROLE instead of
+        the hardcoded name "writer"; when omitted, one is built from the
+        singleton default pool (which maps the base primitive "writer" to the
+        `generate` role). Passing a resolver whose pool uses different names
+        for the same roles makes the evaluator pipeline-agnostic at zero
+        config cost to the existing single-arg call sites.
+
+        Stateless caller — instantiate once per session, like `OutputEvaluator`.
+        No LLM, no network; safe on the offline / no-API-key path.
+        """
         n = len(pipeline.nodes)
         if n == 0 or pipeline.has_cycle():
             # Empty has nothing to measure; a cyclic pipeline never reaches
@@ -111,11 +133,14 @@ class StructuralEvaluator:
             log.debug("evaluate: empty/cyclic pipeline (nodes=%d) → zero scores", n)
             return StructuralScores()
 
+        if resolver is None:
+            resolver = _default_resolver()
+
         critical_path = pipeline.critical_path()
         critical_path_length = max(0, len(critical_path) - 1)  # edges
         dependency_depth = pipeline.depth()  # nodes on the longest path
 
-        unused = _unused_outputs(pipeline)
+        unused = _unused_outputs(pipeline, resolver)
         redundant = _redundant_agents(pipeline)
 
         # Parallelism ratio = fraction of nodes NOT on the critical path.

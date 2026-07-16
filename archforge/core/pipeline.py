@@ -6,6 +6,10 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .roles import RoleResolver
 
 
 def new_pipeline_id() -> str:
@@ -254,6 +258,62 @@ class PipelineDAG:
         that want the count without reconstructing the whole path.
         """
         return self._depth()
+
+    # ----- role-aware introspection (Phase 2 — pipeline-agnostic resolution) ---
+    #
+    # Additive only — none of the existing topo / fingerprint / mutation
+    # methods change, so DAG operations and graph structure stay compatible.
+    # These locate nodes by their primitive's semantic ROLE (via a resolver),
+    # not by primitive NAME, so the terminal generation stage and node
+    # location are decided by role and two pipelines with different primitive
+    # names but identical roles behave identically. `resolver` is duck-typed:
+    # anything exposing `role_of_node(node) -> str | None` will do (the real
+    # `RoleResolver` is the intended producer).
+
+    def nodes_by_role(self, role: str, resolver: "RoleResolver") -> list[AgentNode]:
+        """All nodes whose primitive maps (via `resolver`) to `role`."""
+        return [n for n in self.nodes if resolver.role_of_node(n) == role]
+
+    def leaves_by_role(self, role: str, resolver: "RoleResolver") -> list[AgentNode]:
+        """Leaf nodes whose primitive maps to `role`."""
+        return [n for n in self.leaves() if resolver.role_of_node(n) == role]
+
+    def has_role(self, role: str, resolver: "RoleResolver") -> bool:
+        """True if any node in the DAG plays `role`."""
+        return any(resolver.role_of_node(n) == role for n in self.nodes)
+
+    def terminal_node_by_role(self, role: str, resolver: "RoleResolver") -> AgentNode | None:
+        """The terminal-stage node for `role`, or the topo-last leaf fallback.
+
+        Mirrors what the engine/structural evaluator need from a single
+        "the node whose output the user receives" decision, keyed on role
+        instead of the hardcoded primitive name "writer":
+
+          1. prefer a `role` LEAF; if several, the one last in topological
+             order (the de-facto final stage among them);
+          2. else fall back to the topological-last leaf OVERALL (preserves
+             the original "writer, then last leaf" convention generalized to
+             any terminal role — so a pipeline whose generate node is not a
+             leaf, or whose generate primitive isn't recognized, still has a
+             defined terminal);
+          3. None for an empty or cyclic pipeline (no well-defined terminal).
+
+        `role` is normally `config.TERMINAL_ROLE`.
+        """
+        if not self.nodes:
+            return None
+        try:
+            order = self.topo_order()
+        except ValueError:
+            return None  # cyclic — no well-defined terminal
+        leaves = self.leaves()
+        if not leaves:
+            return None
+        idx = {n.id: i for i, n in enumerate(order)}
+        role_leaves = [n for n in leaves if resolver.role_of_node(n) == role]
+        if role_leaves:
+            return max(role_leaves, key=lambda n: idx[n.id])
+        return max(leaves, key=lambda n: idx[n.id])
 
     # ----- structural mutation (Phase 2) --------------------------------------
     #

@@ -167,8 +167,12 @@ def run_cmd(
     # so the diagnosis can be folded into the single score-judge call below.
     click.echo("→ Evaluating...", err=True)
     log.info("step 6/8: computing structural metrics + judging in ONE LLM call")
-    structural = StructuralEvaluator().evaluate(decision.pipeline)
-    roles = {name: p.role for name, p in default_pool().primitives().items()}
+    # One role resolver (built from the pool) is the single source of truth for
+    # name→role here; the evaluator + diagnostician still take their roles as a
+    # dict (their contract), so hand them a snapshot projection of the resolver.
+    resolver = default_pool().role_resolver()
+    roles = resolver.as_dict()
+    structural = StructuralEvaluator().evaluate(decision.pipeline, resolver=resolver)
 
     # 7. ONE judge call returns scores AND raw diagnoses (merged — the
     # diagnosis adds zero LLM calls vs Phase 1). The Diagnostician then
