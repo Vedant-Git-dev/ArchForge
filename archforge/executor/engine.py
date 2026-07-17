@@ -15,7 +15,7 @@ from typing import Any
 from ..core.pipeline import AgentNode, PipelineDAG
 from ..core.task import Task
 from ..logging import get_logger
-from .agents.base import AgentResult
+from .agents.base import AgentContext, AgentResult
 from .agents.registry import PrimitivePool, default_pool
 from .llm import LLMClient
 
@@ -34,6 +34,8 @@ class NodeTrace:
     completion_tokens: int
     output: dict[str, Any]
     text: str = ""
+    ok: bool = True           # agent-kind-blind soft-fail channel (spec §6)
+    error: str | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -153,6 +155,9 @@ class Engine:
         pool: PrimitivePool | None = None,
     ) -> None:
         self.llm = llm
+        # The capability carrier threaded into every agent run (spec §2).
+        # Sync-only for v1; future slots (tools/scheduler/engine) land here.
+        self._ctx = AgentContext(llm=self.llm)
         self.pool = pool or default_pool()
         # Role-keyed terminal-stage resolution (replaces the hardcoded
         # "writer" name check in final-output extraction). Built from the
@@ -200,7 +205,7 @@ class Engine:
                 i + 1, len(order), node.id, node.agent_type, [p.id for p in preds],
             )
             t0 = time.perf_counter()
-            result = agent.run(payload, self.llm)
+            result = agent(payload, ctx=self._ctx)
             dt = time.perf_counter() - t0
 
             node_outputs[node.id] = result
@@ -226,6 +231,8 @@ class Engine:
                 completion_tokens=result.completion_tokens,
                 output=result.output,
                 text=result.text,
+                ok=result.ok,
+                error=result.error,
             ))
 
         wall_dt = time.perf_counter() - wall_start

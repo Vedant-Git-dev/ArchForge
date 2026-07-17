@@ -1,15 +1,17 @@
-"""summarizer primitive – distil input into a concise representation."""
+"""summarizer primitive – distil input into a concise representation.
+
+Phase 3 shape: a Primitive spec + a shape fn bound through ``build_llm_agent``;
+behavior is identical to the old ``SummarizerAgent.run()``.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from ...core.primitive import Primitive
-from ..llm import LLMClient
-from .base import AgentResult, BaseAgent, call_llm_json
+from .base import AgentCallable, build_llm_agent
 
-
-SYSTEM_PROMPT = """\
+SUMMARIZER_PROMPT = """\
 You are the **summarizer** primitive in a multi-agent pipeline.
 
 Your job is to compress input into a faithful, concise representation.
@@ -36,37 +38,32 @@ by the input. If the input is too sparse or unclear, summarize what is
 present and note the gap.
 """
 
-
-class SummarizerAgent:
-    name = "summarizer"
-    role = "analyze"
-
-    def __init__(self) -> None:
-        self.primitive = Primitive(
-            name="summarizer",
-            level=0,
-            role="analyze",
-            system_prompt=SYSTEM_PROMPT,
-            input_schema={"type": "object"},
-            output_schema={"type": "object", "required": ["summary"]},
-        )
-
-    def run(self, input: dict[str, Any], llm: LLMClient) -> AgentResult:
-        # Forward only the predecessor's salient output, not the whole merged
-        # bag. The engine merges a `base` (task / task_type / raw `input` /
-        # context) into every node's input so terminal agents can still see
-        # the task — but a summarizer summarises what came IN, so re-sending
-        # the original text + task string + context (then again, below) is
-        # needless duplication. Strip the base keys; fall back to the whole
-        # dict only if the predecessor produced nothing usable.
-        base_keys = {"task", "task_type", "input", "context"}
-        upstream = {k: v for k, v in input.items() if k not in base_keys}
-        return call_llm_json(
-            llm,
-            SYSTEM_PROMPT,
-            {"input": upstream or input, "context": input.get("context", {})},
-            kind=self.name,
-        )
+SUMMARIZER_SPEC = Primitive(
+    name="summarizer",
+    level=0,
+    role="analyze",
+    kind="llm",
+    system_prompt=SUMMARIZER_PROMPT,
+    input_schema={"type": "object"},
+    output_schema={"type": "object", "required": ["summary"]},
+    params={},
+)
 
 
-__all__ = ["SummarizerAgent"]
+def _summarizer_shape(input: Mapping[str, Any]) -> Mapping[str, Any]:
+    # Forward only the predecessor's salient output, not the whole merged
+    # bag. The engine merges a `base` (task / task_type / raw `input` /
+    # context) into every node's input so terminal agents can still see
+    # the task — but a summarizer summarises what came IN, so re-sending
+    # the original text + task string + context (then again, below) is
+    # needless duplication. Strip the base keys; fall back to the whole
+    # dict only if the predecessor produced nothing usable.
+    base_keys = {"task", "task_type", "input", "context"}
+    upstream = {k: v for k, v in input.items() if k not in base_keys}
+    return {"input": upstream or input, "context": input.get("context", {})}
+
+
+SUMMARIZER_AGENT: AgentCallable = build_llm_agent(SUMMARIZER_SPEC, _summarizer_shape)
+
+
+__all__ = ["SUMMARIZER_SPEC", "SUMMARIZER_AGENT"]

@@ -20,6 +20,13 @@ class Primitive:
     input_schema: dict = field(default_factory=dict)
     output_schema: dict = field(default_factory=dict)
 
+    # What kind of agent backs this primitive, and per-kind parameters.
+    # "llm"          → reads system_prompt + params (max_tokens/temperature); ctx.llm required.
+    # "deterministic" → a plain Python callable; system_prompt inert; ctx.llm ignored.
+    # (future: "tool"/"http"/"subpipeline") — previewed by the Agent contract, not wired in v1.
+    kind: str = "llm"
+    params: dict = field(default_factory=dict)
+
     # Only meaningful for evolved primitives (Phase 5+).
     source_subgraph: list[str] | None = None
     fusing_prompt: str | None = None
@@ -38,6 +45,8 @@ class Primitive:
             "system_prompt": self.system_prompt,
             "input_schema": self.input_schema,
             "output_schema": self.output_schema,
+            "kind": self.kind,
+            "params": self.params,
             "source_subgraph": self.source_subgraph,
             "fusing_prompt": self.fusing_prompt,
             "validation_score": self.validation_score,
@@ -58,6 +67,8 @@ class Primitive:
             system_prompt=data.get("system_prompt", ""),
             input_schema=data.get("input_schema", {}),
             output_schema=data.get("output_schema", {}),
+            kind=data.get("kind", "llm"),
+            params=data.get("params", {}),
             source_subgraph=data.get("source_subgraph"),
             fusing_prompt=data.get("fusing_prompt"),
             validation_score=data.get("validation_score"),

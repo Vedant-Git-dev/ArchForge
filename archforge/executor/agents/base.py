@@ -1,20 +1,20 @@
-"""Base agent contract + AgentResult + a tiny primitive helper.
+"""Agent contract — an agent is a callable + its description.
 
-All primitives in this package follow the same shape:
-    1. Take a JSON-serialisable input dict from upstream.
-    2. Send it to the LLM with a fixed system_prompt.
-    3. Parse the response back into a dict.
-    4. Return AgentResult(output=..., text=..., tokens=...).
+Every primitive — LLM-backed or a plain deterministic callable — is an
+``Agent``: a ``Primitive`` (description) bound to an ``AgentCallable``. The
+Executor calls ``agent(payload, ctx)`` and doesn't care what the agent IS,
+only that it returns an ``AgentResult``. LLM primitives bind through
+``build_llm_agent``; deterministic agents bind a plain function directly.
 
-The Executor doesn't care WHAT a primitive does, only that it follows
-this contract. Phase 2+ may add streaming, retries, validation hooks.
+``call_llm_json`` is the shared heart of every LLM primitive: serialize a
+payload to JSON, call ``ctx.llm``, parse the response back into a dict.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Mapping
 
 from ...core.primitive import Primitive
 from ...logging import get_logger
@@ -32,24 +32,64 @@ class AgentResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     model: str = ""
+    # Additive — safe defaults so existing constructors (call_llm_json) keep working.
+    latency_ms: float = 0.0      # universal: every agent has a duration (deterministic included)
+    cost: float = 0.0            # self-reported; 0 for deterministic and when no price table exists
+    ok: bool = True              # did the agent succeed? (soft-fail channel, spec §6)
+    error: str | None = None     # failure reason when ok=False
 
     @property
     def total_tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
 
 
-class BaseAgent(Protocol):
-    """The contract every primitive implements.
+# ─── general agent contract (an agent is a callable + its description) ───────
 
-    Implementations expose `name` and `role` (read from Primitive),
-    and a `run(input_dict, llm_client) -> AgentResult` method.
+
+@dataclass
+class AgentContext:
+    """Capability carrier threaded through an agent's run.
+
+    Sync-only for v1. The only live slot is ``llm``; future slots (tools,
+    scheduler, engine) are previewed here so the async scheduler (plan.md
+    Phase 2.5) lands into this carrier without re-opening the agent contract.
     """
 
-    name: str
-    role: str
-    primitive: Primitive
+    llm: LLMClient | None = None
 
-    def run(self, input: dict[str, Any], llm: LLMClient) -> AgentResult: ...
+
+# An agent IS a callable from (input, ctx) -> AgentResult. No class hierarchy.
+AgentCallable = Callable[[Mapping[str, Any], AgentContext], AgentResult]
+
+
+@dataclass
+class Agent:
+    """Universal binder: a Primitive (description) + a callable (behavior).
+
+    Every primitive — LLM-backed or a plain Python callable — is an ``Agent``.
+    Execute by calling it directly: ``agent(payload, ctx)``. The transitional
+    ``.run(input, llm)`` shim keeps the old test call sites
+    (``pool.get(name).run(payload, StubLLM(...))``) working unchanged; new code
+    calls ``agent(payload, ctx)`` directly.
+    """
+
+    primitive: Primitive
+    call: AgentCallable
+
+    @property
+    def name(self) -> str:
+        return self.primitive.name
+
+    @property
+    def role(self) -> str:
+        return self.primitive.role
+
+    def __call__(self, input, ctx: AgentContext | None = None) -> AgentResult:
+        return self.call(dict(input), ctx)
+
+    def run(self, input, llm: LLMClient | None = None) -> AgentResult:
+        """Transitional shim for the old ``agent.run(input, llm)`` contract."""
+        return self.call(dict(input), AgentContext(llm=llm))
 
 
 # ─── shared helpers ─────────────────────────────────────────────────────────
@@ -141,3 +181,34 @@ def call_llm_json(
         completion_tokens=result.completion_tokens,
         model=result.model,
     )
+
+
+def build_llm_agent(
+    primitive: Primitive,
+    shape: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+) -> AgentCallable:
+    """Build an LLM-backed ``AgentCallable`` from a Primitive spec + a shape fn.
+
+    The shape fn maps the engine's node-input payload to the JSON payload the
+    LLM receives — it carries each primitive's re-keying/derivation logic
+    (and its own ``log.warning`` calls) verbatim from the old class ``run()``.
+    ``primitive.params`` carries ``max_tokens``/``temperature`` (defaults
+    1024/0.2, matching ``call_llm_json``). Raises ``RuntimeError`` at call-time
+    if ``ctx``/``ctx.llm`` is missing — an LLM agent cannot run without a client.
+    """
+    prompt = primitive.system_prompt
+    kind = primitive.name
+    max_tokens = primitive.params.get("max_tokens", 1024)
+    temperature = primitive.params.get("temperature", 0.2)
+
+    def _run(input, ctx):
+        if ctx is None or ctx.llm is None:
+            raise RuntimeError(
+                f"llm-kind agent {kind!r} needs ctx.llm; got ctx={ctx!r}"
+            )
+        return call_llm_json(
+            ctx.llm, prompt, dict(shape(input)),
+            kind=kind, max_tokens=max_tokens, temperature=temperature,
+        )
+
+    return _run

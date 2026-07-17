@@ -1,15 +1,19 @@
-"""reader primitive – ingest arbitrary input and normalise into structured form."""
+"""reader primitive – ingest arbitrary input and normalise into structured form.
+
+Phase 3 shape: a Primitive spec + a shape fn bound through ``build_llm_agent``.
+Behavior is identical to the old ``ReaderAgent.run()`` — the spec holds the
+prompt/schemas, the shape fn carries the (verbatim) re-keying, and the factory
+threads ``ctx.llm`` through ``call_llm_json``.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from ...core.primitive import Primitive
-from ..llm import LLMClient
-from .base import AgentResult, BaseAgent, call_llm_json
+from .base import AgentCallable, build_llm_agent
 
-
-SYSTEM_PROMPT = """\
+READER_PROMPT = """\
 You are the **reader** primitive in a multi-agent pipeline.
 
 Your job is to take raw input and produce a structured, normalised
@@ -28,28 +32,23 @@ Return JSON with these fields:
 Be terse. Do not add opinions or summaries.
 """
 
-
-class ReaderAgent:
-    name = "reader"
-    role = "ingest"
-
-    def __init__(self) -> None:
-        self.primitive = Primitive(
-            name="reader",
-            level=0,
-            role="ingest",
-            system_prompt=SYSTEM_PROMPT,
-            input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
-            output_schema={"type": "object", "required": ["text"]},
-        )
-
-    def run(self, input: dict[str, Any], llm: LLMClient) -> AgentResult:
-        return call_llm_json(
-            llm,
-            SYSTEM_PROMPT,
-            {"input": input.get("input", ""), "context": input.get("context", {})},
-            kind=self.name,
-        )
+READER_SPEC = Primitive(
+    name="reader",
+    level=0,
+    role="ingest",
+    kind="llm",
+    system_prompt=READER_PROMPT,
+    input_schema={"type": "object", "properties": {"input": {"type": "string"}}},
+    output_schema={"type": "object", "required": ["text"]},
+    params={},
+)
 
 
-__all__ = ["ReaderAgent"]
+def _reader_shape(input: Mapping[str, Any]) -> Mapping[str, Any]:
+    return {"input": input.get("input", ""), "context": input.get("context", {})}
+
+
+READER_AGENT: AgentCallable = build_llm_agent(READER_SPEC, _reader_shape)
+
+
+__all__ = ["READER_SPEC", "READER_AGENT"]

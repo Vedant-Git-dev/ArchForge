@@ -1,15 +1,17 @@
-"""classifier primitive – label items with relevant categories."""
+"""classifier primitive – label items with relevant categories.
+
+Phase 3 shape: a Primitive spec + a shape fn bound through ``build_llm_agent``;
+behavior is identical to the old ``ClassifierAgent.run()``.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from ...core.primitive import Primitive
-from ..llm import LLMClient
-from .base import AgentResult, BaseAgent, call_llm_json
+from .base import AgentCallable, build_llm_agent
 
-
-SYSTEM_PROMPT = """\
+CLASSIFIER_PROMPT = """\
 You are the **classifier** primitive in a multi-agent pipeline.
 
 Your job is to assign labels to each input item. You do not summarise,
@@ -32,29 +34,24 @@ Return JSON with:
 Be specific over generic. Avoid single-word labels when a phrase is clearer.
 """
 
-
-class ClassifierAgent:
-    name = "classifier"
-    role = "analyze"
-
-    def __init__(self) -> None:
-        self.primitive = Primitive(
-            name="classifier",
-            level=0,
-            role="analyze",
-            system_prompt=SYSTEM_PROMPT,
-            input_schema={"type": "object", "required": ["items"]},
-            output_schema={"type": "object", "required": ["categories"]},
-        )
-
-    def run(self, input: dict[str, Any], llm: LLMClient) -> AgentResult:
-        items = input.get("items") or input.get("chunks") or [input.get("text", "")]
-        return call_llm_json(
-            llm,
-            SYSTEM_PROMPT,
-            {"items": items, "context": input.get("context", {})},
-            kind=self.name,
-        )
+CLASSIFIER_SPEC = Primitive(
+    name="classifier",
+    level=0,
+    role="analyze",
+    kind="llm",
+    system_prompt=CLASSIFIER_PROMPT,
+    input_schema={"type": "object", "required": ["items"]},
+    output_schema={"type": "object", "required": ["categories"]},
+    params={},
+)
 
 
-__all__ = ["ClassifierAgent"]
+def _classifier_shape(input: Mapping[str, Any]) -> Mapping[str, Any]:
+    items = input.get("items") or input.get("chunks") or [input.get("text", "")]
+    return {"items": items, "context": input.get("context", {})}
+
+
+CLASSIFIER_AGENT: AgentCallable = build_llm_agent(CLASSIFIER_SPEC, _classifier_shape)
+
+
+__all__ = ["CLASSIFIER_SPEC", "CLASSIFIER_AGENT"]

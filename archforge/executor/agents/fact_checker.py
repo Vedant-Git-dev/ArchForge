@@ -1,18 +1,21 @@
-"""fact_checker primitive – verify claims against available evidence."""
+"""fact_checker primitive – verify claims against available evidence.
+
+Phase 3 shape: a Primitive spec + a shape fn bound through ``build_llm_agent``;
+behavior is identical to the old ``FactCheckerAgent.run()`` (including the two
+missing-claims/missing-evidence warnings, carried verbatim into the shape fn).
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from ...core.primitive import Primitive
 from ...logging import get_logger
-from ..llm import LLMClient
-from .base import AgentResult, BaseAgent, call_llm_json
+from .base import AgentCallable, build_llm_agent
 
 log = get_logger("agent.fact_checker")
 
-
-SYSTEM_PROMPT = """\
+FACT_CHECKER_PROMPT = """\
 You are the **fact_checker** primitive in a multi-agent pipeline.
 
 Your job is to evaluate whether each claim is supported by the evidence
@@ -36,62 +39,53 @@ Verdicts must be conservative: when in doubt, mark "weakly_supported" rather
 than "supported". Never invent evidence that wasn't provided.
 """
 
+FACT_CHECKER_SPEC = Primitive(
+    name="fact_checker",
+    level=0,
+    role="validate",
+    kind="llm",
+    system_prompt=FACT_CHECKER_PROMPT,
+    input_schema={"type": "object", "required": ["claims", "evidence"]},
+    output_schema={"type": "object", "required": ["verdicts"]},
+    params={},
+)
 
-class FactCheckerAgent:
-    name = "fact_checker"
-    role = "validate"
 
-    def __init__(self) -> None:
-        self.primitive = Primitive(
-            name="fact_checker",
-            level=0,
-            role="validate",
-            system_prompt=SYSTEM_PROMPT,
-            input_schema={"type": "object", "required": ["claims", "evidence"]},
-            output_schema={"type": "object", "required": ["verdicts"]},
+def _fact_checker_shape(input: Mapping[str, Any]) -> Mapping[str, Any]:
+    # Claims to verify. A well-formed upstream (an explicit `claims`
+    # source, or the summarizer) hands us concrete claims; otherwise we
+    # derive them from the summarizer's `key_points`, or from its
+    # `summary` string as a single claim. Evidence is the source text
+    # the claims were drawn from — the engine carries the original input
+    # as `input`, with upstream `text` as a fallback. When the pipeline
+    # topology supplies neither, we run on empty and the warnings below
+    # make that loss visible instead of silent.
+    claims = input.get("claims")
+    if not claims:
+        claims = input.get("key_points") or (
+            [input["summary"]] if input.get("summary") else []
+        )
+    evidence = input.get("evidence")
+    if not evidence:
+        evidence = input.get("input") or input.get("text") or ""
+
+    if not claims:
+        log.warning(
+            "fact_checker: no claims to verify (input_keys=%s); expected "
+            "claims/key_points/summary from upstream",
+            list(input.keys()),
+        )
+    if not evidence:
+        log.warning(
+            "fact_checker: no evidence source (input_keys=%s); expected "
+            "evidence/input/text to carry the source text",
+            list(input.keys()),
         )
 
-    def run(self, input: dict[str, Any], llm: LLMClient) -> AgentResult:
-        # Claims to verify. A well-formed upstream (an explicit `claims`
-        # source, or the summarizer) hands us concrete claims; otherwise we
-        # derive them from the summarizer's `key_points`, or from its
-        # `summary` string as a single claim. Evidence is the source text
-        # the claims were drawn from — the engine carries the original input
-        # as `input`, with upstream `text` as a fallback. When the pipeline
-        # topology supplies neither, we run on empty and the warnings below
-        # make that loss visible instead of silent.
-        claims = input.get("claims")
-        if not claims:
-            claims = input.get("key_points") or (
-                [input["summary"]] if input.get("summary") else []
-            )
-        evidence = input.get("evidence")
-        if not evidence:
-            evidence = input.get("input") or input.get("text") or ""
-
-        if not claims:
-            log.warning(
-                "fact_checker: no claims to verify (input_keys=%s); expected "
-                "claims/key_points/summary from upstream",
-                list(input.keys()),
-            )
-        if not evidence:
-            log.warning(
-                "fact_checker: no evidence source (input_keys=%s); expected "
-                "evidence/input/text to carry the source text",
-                list(input.keys()),
-            )
-
-        return call_llm_json(
-            llm,
-            SYSTEM_PROMPT,
-            {
-                "claims": claims,
-                "evidence": evidence,
-                "context": input.get("context", {}),
-            },
-            kind=self.name,
-        )
+    return {"claims": claims, "evidence": evidence, "context": input.get("context", {})}
 
 
-__all__ = ["FactCheckerAgent"]
+FACT_CHECKER_AGENT: AgentCallable = build_llm_agent(FACT_CHECKER_SPEC, _fact_checker_shape)
+
+
+__all__ = ["FACT_CHECKER_SPEC", "FACT_CHECKER_AGENT"]
