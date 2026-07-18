@@ -62,8 +62,13 @@ floor) under "poor_signals". You MUST emit a diagnosis for every pre-marked \
 poor metric, AND for any other poor metric or structural defect you detect. \
 Reason ONLY from the supplied data (task, input_word_count, final output, \
 the normalized metrics with their floors, the pipeline topology with each \
-node's agent_type + role and per-node traces). Do not invent metrics, nodes, \
-or verdicts.
+node's agent_type + role and per-node traces, and the available_primitives \
+catalog of every primitive this pool offers). Do not invent metrics, nodes, \
+or verdicts. When a diagnosis implies a MISSING capability (e.g. no_validator), \
+check available_primitives: if the pool offers a primitive of the required \
+role that is simply absent from this topology, say so in the diagnosis \
+reason (it is an insertion opportunity, not a vocabulary gap); only if the \
+pool does NOT offer that role is the capability truly unavailable.
 
 A metric is poor when its normalized value is below its floor. A structural \
 defect is poor when the topology has unused output nodes, redundant agents, \
@@ -97,10 +102,17 @@ Allowed roots and what they mean:
 - "no_critique_loop": a generate step with no critique→revision cycle
 - "unnecessary_agents": agent nodes that do not earn their place for THIS
   task — either they don't contribute to the final output, or the step is
-  overkill given the task and the input size. 
+  overkill given the task and the input size.
   Decide necessity per agent from the task, task type, input_word_count, and
   each node's trace — do NOT catenate module names. Give the offending
   node_ids in target_nodes.
+  IMPORTANT: a node's `kind` (from available_primitives) is "deterministic"
+  is ZERO-TOKEN BY DESIGN (e.g. a file-reader ingests the file without an LLM
+  call) — its 0-token trace is NOT a sign the node did nothing. Judge a
+  deterministic node's necessity by whether its OUTPUT FIELDS were read by a
+  downstream node (its output_keys appear in a successor's input), NEVER by
+  its token count. Do NOT flag a deterministic node as "unnecessary_agents"
+  merely for having 0 tokens.
 - "deep_chain": an unusually long, fragile dependency chain
 
 If cost is poor because the pipeline did too much work for a small input,
@@ -146,6 +158,7 @@ def _build_judge_payload(
     *,
     speed: float | None = None,
     cost: float | None = None,
+    pool_catalog: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Grounding for the combined judge — every fact the LLM should reason over.
 
@@ -155,12 +168,21 @@ def _build_judge_payload(
     silent only if the model can't see the floor — so we show it the floor.
     Accuracy is determined by the model's own Step 1, so we pass its floor
     only and let it self-check.
+
+    ``pool_catalog`` (name/role/kind for every primitive the active pool
+    offers) grounds capability-vs-topology diagnoses: a ``no_validator``
+    diagnosis can be cross-checked against "a validate-role primitive exists
+    in the pool but is absent from this topology" — vs. the pool simply not
+    offering one. Optional so tests that don't build a catalog see the old
+    payload shape.
     """
     payload: dict[str, Any] = {
         "task_description": task.description,
         "task_type": task.type,
         "output": result.final_output,
     }
+    if pool_catalog is not None:
+        payload["available_primitives"] = pool_catalog
     # structural surface + per-node traces always travel together
     topology = [
         {
@@ -324,6 +346,7 @@ class OutputEvaluator:
         structural: StructuralScores,
         roles: dict[str, str],
         user_rating: float | None = None,
+        pool_catalog: list[dict[str, Any]] | None = None,
     ) -> tuple[OutputScores, list[dict[str, Any]] | None, bool]:
         """Score + raw diagnoses in ONE judge call.
 
@@ -341,9 +364,15 @@ class OutputEvaluator:
         scores are real; only the diagnoses are absent.) Sanitizing the raw
         list (clamp roots, drop malformed, fall back to the deterministic floor,
         augment deterministic structural facts) is the Diagnostician's job.
+
+        ``pool_catalog`` (name/role/kind for every primitive the active pool
+        offers) is forwarded to the judge payload as ``available_primitives``
+        so capability-vs-topology diagnoses (e.g. ``no_validator``) are
+        grounded in what the pool can actually provide. Optional: tests that
+        don't build a catalog get the legacy payload (no such field).
         """
         accuracy, completeness, _rationale, raw, speed, cost, parse_failed = (
-            self._judge_with_diagnosis(task, result, structural, roles)
+            self._judge_with_diagnosis(task, result, structural, roles, pool_catalog)
         )
         log.info(
             "evaluate_with_diagnosis: judge accuracy=%.3f completeness=%.3f | "
@@ -370,6 +399,7 @@ class OutputEvaluator:
         result: PipelineResult,
         structural: StructuralScores,
         roles: dict[str, str],
+        pool_catalog: list[dict[str, Any]] | None = None,
     ) -> tuple[float, float, str, list[dict[str, Any]] | None, float, float, bool]:
         # Speed/cost are deterministic normalizations — compute them BEFORE
         # the judge call so we can ground the diagnosis with the normalized
@@ -382,7 +412,8 @@ class OutputEvaluator:
             result.total_tokens, COST_BUDGET_TOKENS, COST_PENALTY_FLOOR, lower_is_better=True
         )
         payload = _build_judge_payload(
-            task, result, structural, roles, speed=speed, cost=cost
+            task, result, structural, roles, speed=speed, cost=cost,
+            pool_catalog=pool_catalog,
         )
         response = self.llm.chat(
             system=COMBINED_JUDGE_PROMPT.format(roots=", ".join(STRUCTURAL_ROOTS)),

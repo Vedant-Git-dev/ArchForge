@@ -187,10 +187,13 @@ def default_interventions() -> list[Intervention]:
       root"), so it has no seed here.
     - `unnecessary_agents` (live, absent from the plan table) gets a DELETE
       seed targeting the nodes the diagnosis itself named.
-    - `no_critique_loop` seeds ``critic`` — a planned Phase 2.5 base primitive
-      not yet in the pool. ``is_structurally_eligible`` gates it ineligible
-      until the primitive is registered, so the seed documents the intended
-      fix and auto-activates the moment it lands.
+    - `no_critique_loop` seeds ``critic`` — now a REGISTERED base primitive
+      (``generate`` role, after the writer, verify-and-revise terminal). The
+      `no_validator` diagnosis points at a missing VERIFY of the final answer;
+      the critic IS that verify-and-revise step (it checks the writer's draft
+      against the source and emits the grounded output as the terminal).
+      ``is_structurally_eligible``'s pool gate
+      (``agent_to_insert in pool.names()``) now passes.
     """
     return [
         Intervention(
@@ -239,7 +242,13 @@ def default_interventions() -> list[Intervention]:
             diagnosis_pattern="no_critique_loop",
             mutation_type="insert",
             target_slot="after_generate",
-            agent_to_insert="critic",  # planned Phase 2.5 primitive; gated ineligible until registered
+            # AFTER the writer: the critic is a verify-and-revise TERMINAL
+            # (generate-role leaf → _extract_final_output picks its `output`
+            # for free, no engine change). It checks the writer's draft against
+            # the forwarded source and emits the grounded answer — unlike a
+            # verdict-only validator after the writer, its output is NOT dead
+            # (it IS the terminal, so no unused_outputs self-trigger).
+            agent_to_insert="critic",
         ),
         Intervention(
             id="iv-deep_chain-merge",

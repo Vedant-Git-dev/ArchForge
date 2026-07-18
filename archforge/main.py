@@ -172,6 +172,15 @@ def run_cmd(
     # dict (their contract), so hand them a snapshot projection of the resolver.
     resolver = default_pool().role_resolver()
     roles = resolver.as_dict()
+    # The pool catalog goes to the judge: name/role/kind for EVERY primitive the
+    # active pool offers, so a capability-vs-topology diagnosis (e.g.
+    # no_validator) can be grounded in "a validate-role primitive exists in the
+    # pool but is absent from this topology" rather than guessing at vocabulary.
+    active_pool = default_pool()
+    pool_catalog = [
+        {"name": name, "role": prim.role, "kind": prim.kind}
+        for name, prim in active_pool.primitives().items()
+    ]
     structural = StructuralEvaluator().evaluate(decision.pipeline, resolver=resolver)
 
     # 7. ONE judge call returns scores AND raw diagnoses (merged — the
@@ -180,7 +189,7 @@ def run_cmd(
     # failure, augment deterministic structural facts).
     evaluator = OutputEvaluator(llm=llm)
     output, raw_diagnoses, judge_parse_failed = evaluator.evaluate_with_diagnosis(
-        task, result, structural=structural, roles=roles,
+        task, result, structural=structural, roles=roles, pool_catalog=pool_catalog,
     )
     log.info(
         "step 6/8: scores accuracy=%.3f completeness=%.3f speed=%.3f cost=%.3f%s",

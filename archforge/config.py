@@ -49,8 +49,8 @@ GROQ_API_KEY_ENV = "GROQ_API_KEY"
 DEFAULT_LLM_ROUTES: dict[str, str] = {
     "reader": "llama-3.1-8b-instant",
     "chunker": "llama-3.1-8b-instant",
-    "classifier": "qwen/qwen3-32b",
-    "summarizer": "qwen/qwen3-32b",
+    "classifier": "qwen/qwen3.6-27b",
+    "summarizer": "qwen/qwen3.6-27b",
     "fact_checker": "openai/gpt-oss-120b",
     "writer": "openai/gpt-oss-20b",
     "judge": "openai/gpt-oss-120b",

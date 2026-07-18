@@ -31,6 +31,7 @@ from ...core.roles import RoleResolver
 from .base import Agent, AgentCallable
 from .chunker import CHUNKER_AGENT, CHUNKER_SPEC
 from .classifier import CLASSIFIER_AGENT, CLASSIFIER_SPEC
+from .critic import CRITIC_AGENT, CRITIC_SPEC
 from .fact_checker import FACT_CHECKER_AGENT, FACT_CHECKER_SPEC
 from .reader import READER_AGENT, READER_SPEC
 from .regex_extractor import REGEX_SPEC, regex_extractor
@@ -51,6 +52,7 @@ AGENT_SPECS: dict[str, tuple[Primitive, AgentCallable]] = {
     "summarizer": (SUMMARIZER_SPEC, SUMMARIZER_AGENT),
     "fact_checker": (FACT_CHECKER_SPEC, FACT_CHECKER_AGENT),
     "writer": (WRITER_SPEC, WRITER_AGENT),
+    "critic": (CRITIC_SPEC, CRITIC_AGENT),
     "regex_extractor": (REGEX_SPEC, regex_extractor),
 }
 
