@@ -1,9 +1,6 @@
-"""ArchForge package."""
+"""ArchForge — a self-improving meta-layer over multi-agent systems.
 
-# Importing the package wires up the archforge.* logging tree with a
-# NullHandler, so the library is silent unless the application calls
-# configure_logging(). Kept here so the handler exists even for callers
-# that grab archforge.* submodules without touching archforge.logging.
-from . import logging as _logging  # noqa: F401
+See docs/superpowers/specs/2026-07-22-archforge-design.md for the design.
+"""
 
 __version__ = "0.1.0"

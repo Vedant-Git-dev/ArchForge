@@ -1,29 +1,38 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "archforge"
 version = "0.1.0"
-description = "Self-learning multi-agent pipeline builder"
-requires-python = ">=3.10"
+description = "ArchForge — a self-improving meta-layer over multi-agent systems"
+readme = "README.md"
+requires-python = ">=3.11"
 dependencies = [
-    "groq>=0.4.0",
-    "sentence-transformers>=2.2.0",
-    "numpy>=1.24",
-    "click>=8.1",
-    "pyyaml>=6.0",
-    "python-dotenv>=1.0",
+    "pydantic>=2.7",
 ]
 
-[project.scripts]
-archforge = "archforge.main:cli"
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "hypothesis>=6",
+    "ruff>=0.5",
+    "mypy>=1.11",
+]
 
-[tool.setuptools.packages.find]
-include = ["archforge*"]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.package-data]
-archforge = ["primitives/*.yaml", "interventions/*.yaml"]
+[tool.hatch.build.targets.wheel]
+packages = ["archforge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
