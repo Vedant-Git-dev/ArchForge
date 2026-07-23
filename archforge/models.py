@@ -126,17 +126,24 @@ class Edge(BaseModel):
 
 
 class Spec(BaseModel):
-    """A versioned pipeline: agents + wiring. Immutable; identified by content.
+    """A versioned pipeline: agents + wiring. Immutable; identified by content+lineage.
 
-    `spec_id` is a content hash computed over the *canonical* (sorted, alias-free)
-    JSON of (nodes, edges). Parent lineage is excluded from the hash — a Spec's
-    identity is what it *is*, not where it came from — so the lineage pointer
-    never changes identity.
+    `spec_id` is a content hash over the *canonical* (sorted, alias-free) JSON of
+    `(nodes, edges, parent_spec_id)`.
+
+      * Content (nodes, edges) is included → "content-addressed."
+      * Lineage (parent_spec_id) is included → each lineage node is a *distinct*
+        stored object; two Specs with identical structure but different parents get
+        different ids (so the store never faces a same-content-different-parent
+        file collision). This mirrors a git commit hash, which counts its parent.
+      * Runtime role (`status`) and write-time (`created_at`) are *excluded*: a
+        Spec's identity is stable as it is promoted or rolled back (only the store's
+        `active` pointer and `archived` set move), so immutability (I2) holds.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # `spec_id` is excluded from content (would be circular); assigned lazily.
+    # `spec_id` is excluded from content (would be circular); assigned at commit.
     spec_id: str | None = None
     parent_spec_id: str | None = None
     status: SpecStatus = SpecStatus.CANDIDATE
@@ -145,12 +152,12 @@ class Spec(BaseModel):
     edges: list[Edge] = Field(default_factory=list)
 
     def compute_spec_id(self) -> str:
-        """Return the content-addressed id (sha256 hex of canonical content)."""
+        """Return the content-addressed id (sha256 hex of canonical content+lineage)."""
 
         return _content_hash(self._canonical_payload())
 
     def _canonical_payload(self) -> dict[str, Any]:
-        """Nodes+edges only, sorted deterministically, with `from` alias restored."""
+        """Nodes + edges + parent, sorted deterministically, with `from` alias restored."""
 
         nodes = sorted(
             (n.model_dump(mode="json") for n in self.nodes), key=lambda n: n["node_id"]
@@ -159,7 +166,7 @@ class Spec(BaseModel):
             (e.model_dump(mode="json", by_alias=True) for e in self.edges),
             key=lambda e: (e["from"], e["to"], e["type"]),
         )
-        return {"nodes": nodes, "edges": edges}
+        return {"nodes": nodes, "edges": edges, "parent_spec_id": self.parent_spec_id}
 
 
 # --------------------------------------------------------------------------- #
